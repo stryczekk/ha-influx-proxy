@@ -1,0 +1,79 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "InfluxDB connection",
+        "description": "The InfluxQL `/query` endpoint of InfluxDB 1.x, 2.x (v1 compatibility API with a DBRP mapping) or 3.x.",
+        "data": {
+          "url": "URL",
+          "database": "Database",
+          "auth": "Authentication",
+          "verify_ssl": "Verify SSL certificate"
+        },
+        "data_description": {
+          "url": "For example http://192.168.1.10:8086",
+          "database": "In InfluxDB 2.x/3.x: the database name mapped to your bucket."
+        }
+      },
+      "credentials": {
+        "title": "Credentials",
+        "description": "A read-only account is enough and recommended.",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "token": "Token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to InfluxDB.",
+      "invalid_auth": "Invalid credentials.",
+      "database_not_found": "Database not found.",
+      "unknown": "Unexpected error, see the log.",
+      "url_credentials": "Do not put a username or password in the URL - they are asked for in the next step.",
+      "invalid_url": "Invalid URL; expected http:// or https://.",
+      "not_influxdb": "Something other than InfluxDB answered at this URL (e.g. a login page)."
+    },
+    "abort": {
+      "single_instance_allowed": "Already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Measurements and limits",
+        "description": "The proxy has to read from the same measurements (InfluxDB tables) that Home Assistant's InfluxDB integration writes to. Copy the settings you have there - otherwise the charts stay empty.",
+        "data": {
+          "measurement_mode": "Measurement name comes from",
+          "default_measurement": "Default measurement",
+          "override_measurement": "Override measurement",
+          "max_entities": "Max entities per request",
+          "max_days": "Max days per request"
+        },
+        "data_description": {
+          "measurement_mode": "Unit: all temperatures in \"°C\", humidity in \"%\" - what Home Assistant does unless you changed it. entity_id: every entity in its own measurement. Domain and device class: e.g. \"sensor__temperature\".",
+          "default_measurement": "For entities the rule above gives no name for, e.g. without a unit (on/off states, modes). Same as \"default_measurement\" in the InfluxDB integration, often \"state\". Empty = the entity_id.",
+          "override_measurement": "Reads every entity from this one measurement and ignores the rules above. Same as \"override_measurement\" in the InfluxDB integration. Usually empty.",
+          "max_entities": "How many entities a card may fetch at once - a guard against overloading the database.",
+          "max_days": "How far back one request may go (800 days = about 2 years)."
+        }
+      }
+    }
+  },
+  "selector": {
+    "auth": {
+      "options": {
+        "none": "None",
+        "basic": "Username and password",
+        "token": "Token (InfluxDB 2.x/3.x)"
+      }
+    },
+    "measurement_mode": {
+      "options": {
+        "unit_of_measurement": "Unit, e.g. °C (Home Assistant default)",
+        "entity_id": "entity_id of the entity",
+        "domain_device_class": "Domain and device class, e.g. sensor__temperature"
+      }
+    }
+  }
+}

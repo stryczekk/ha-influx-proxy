@@ -1,0 +1,79 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Połączenie z InfluxDB",
+        "description": "Endpoint InfluxQL `/query` z InfluxDB 1.x, 2.x (API zgodności v1 z mapowaniem DBRP) albo 3.x.",
+        "data": {
+          "url": "URL",
+          "database": "Baza danych",
+          "auth": "Uwierzytelnianie",
+          "verify_ssl": "Sprawdzaj certyfikat SSL"
+        },
+        "data_description": {
+          "url": "Na przykład http://192.168.1.10:8086",
+          "database": "W InfluxDB 2.x/3.x: nazwa bazy zmapowana na bucket."
+        }
+      },
+      "credentials": {
+        "title": "Dane logowania",
+        "description": "Wystarczy i zalecane jest konto tylko do odczytu.",
+        "data": {
+          "username": "Użytkownik",
+          "password": "Hasło",
+          "token": "Token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nie można połączyć się z InfluxDB.",
+      "invalid_auth": "Nieprawidłowe dane logowania.",
+      "database_not_found": "Nie znaleziono bazy danych.",
+      "unknown": "Nieoczekiwany błąd, szczegóły w dzienniku.",
+      "url_credentials": "Nie wpisuj loginu ani hasła w adresie — podasz je w następnym kroku.",
+      "invalid_url": "Nieprawidłowy adres; oczekiwano http:// albo https://.",
+      "not_influxdb": "Pod tym adresem odpowiada coś innego niż InfluxDB (np. strona logowania)."
+    },
+    "abort": {
+      "single_instance_allowed": "Już skonfigurowane."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Pomiary i limity",
+        "description": "Proxy musi czytać z tych samych pomiarów (tabel InfluxDB), do których zapisuje integracja InfluxDB w Home Assistant. Ustaw tu to samo, co masz tam — inaczej wykresy będą puste.",
+        "data": {
+          "measurement_mode": "Nazwa pomiaru pochodzi z",
+          "default_measurement": "Domyślny pomiar",
+          "override_measurement": "Wymuszony pomiar",
+          "max_entities": "Maks. encji w zapytaniu",
+          "max_days": "Maks. dni w zapytaniu"
+        },
+        "data_description": {
+          "measurement_mode": "Jednostka: wszystkie temperatury w „°C”, wilgotność w „%” — tak zapisuje Home Assistant, jeśli tego nie zmieniałeś. entity_id: każda encja we własnym pomiarze. Domena i klasa: np. „sensor__temperature”.",
+          "default_measurement": "Dla encji, dla których reguła wyżej nie daje nazwy, np. bez jednostki (włączone/wyłączone, tryby). To samo co „default_measurement” w integracji InfluxDB, często „state”. Puste = nazwą jest entity_id.",
+          "override_measurement": "Czyta wszystkie encje z tego jednego pomiaru, reguły wyżej są pomijane. To samo co „override_measurement” w integracji InfluxDB. Zwykle puste.",
+          "max_entities": "Ile encji karta może pobrać naraz — bezpiecznik przed przeciążeniem bazy.",
+          "max_days": "Jak daleko wstecz sięga jedno zapytanie (800 dni ≈ 2 lata)."
+        }
+      }
+    }
+  },
+  "selector": {
+    "auth": {
+      "options": {
+        "none": "Brak",
+        "basic": "Użytkownik i hasło",
+        "token": "Token (InfluxDB 2.x/3.x)"
+      }
+    },
+    "measurement_mode": {
+      "options": {
+        "unit_of_measurement": "Jednostka, np. °C (domyślne w Home Assistant)",
+        "entity_id": "entity_id encji",
+        "domain_device_class": "Domena i klasa urządzenia, np. sensor__temperature"
+      }
+    }
+  }
+}

@@ -1,0 +1,207 @@
+"""InfluxDB Proxy - long-term history from InfluxDB for Lovelace cards.
+
+A card runs in the browser, so querying InfluxDB directly only works on
+the local network: through a remote-access tunnel that points at Home
+Assistant the browser cannot reach a separate database host. This
+integration exposes an endpoint INSIDE Home Assistant instead, so cards
+only ever talk to HA - with the user's HA session, and without the
+database password ever reaching the browser.
+
+    GET /api/influx_proxy/series?entities=sensor.a,sensor.b&days=30
+
+The endpoint builds every query itself from entity ids; it does not
+accept InfluxQL from the client.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+from aiohttp import web
+import voluptuous as vol
+
+from homeassistant.auth.permissions.const import POLICY_READ
+from homeassistant.components.http import HomeAssistantView
+from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME
+from homeassistant.core import DOMAIN as HA_DOMAIN, HomeAssistant
+from homeassistant.helpers import config_validation as cv, issue_registry as ir
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
+
+from .client import InfluxError, run_query
+from .const import (
+    API_PATH,
+    CONF_DATABASE,
+    CONF_DEFAULT_MEASUREMENT,
+    CONF_MAX_DAYS,
+    CONF_MAX_ENTITIES,
+    CONF_MEASUREMENT_MODE,
+    CONF_OVERRIDE_MEASUREMENT,
+    DEFAULT_DATABASE,
+    DEFAULT_MAX_DAYS,
+    DEFAULT_MAX_ENTITIES,
+    DOMAIN,
+)
+from .query import (
+    MEASUREMENT_UNIT,
+    MeasurementNaming,
+    measurement_for,
+    parse_results,
+    series_query,
+    unsafe_measurement,
+    valid_entity_id,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+# Concurrent queries sent to InfluxDB. A logged-in user cannot pile up
+# unbounded long-range queries; extra requests simply wait their turn.
+MAX_CONCURRENT_QUERIES = 4
+
+# Legacy YAML configuration (from before the config flow). Still accepted
+# and imported into a config entry once, with a repair issue asking to
+# remove it.
+CONFIG_SCHEMA = vol.Schema(
+    {
+        DOMAIN: vol.Schema(
+            {
+                vol.Required(CONF_URL): cv.string,
+                vol.Optional(CONF_DATABASE, default=DEFAULT_DATABASE): cv.string,
+                vol.Optional(CONF_USERNAME, default=""): cv.string,
+                vol.Optional(CONF_PASSWORD, default=""): cv.string,
+                vol.Optional(CONF_MAX_ENTITIES, default=DEFAULT_MAX_ENTITIES): cv.positive_int,
+                vol.Optional(CONF_MAX_DAYS, default=DEFAULT_MAX_DAYS): cv.positive_int,
+            }
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the endpoint once; import legacy YAML if present."""
+    hass.data.setdefault(DOMAIN, {})
+    # A view cannot be unregistered, so it is registered once here and
+    # answers 503 while no config entry is loaded.
+    hass.http.register_view(SeriesView(hass))
+
+    if DOMAIN in config:
+        hass.async_create_task(
+            hass.config_entries.flow.async_init(
+                DOMAIN, context={"source": SOURCE_IMPORT}, data=dict(config[DOMAIN])
+            )
+        )
+        ir.async_create_issue(
+            hass,
+            HA_DOMAIN,
+            f"deprecated_yaml_{DOMAIN}",
+            is_fixable=False,
+            issue_domain=DOMAIN,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="deprecated_yaml",
+            translation_placeholders={"domain": DOMAIN, "integration_title": "InfluxDB Proxy"},
+        )
+    else:
+        # YAML already removed: withdraw the notice, otherwise it would stay
+        # in the repairs panel forever.
+        ir.async_delete_issue(hass, HA_DOMAIN, f"deprecated_yaml_{DOMAIN}")
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    hass.data[DOMAIN]["settings"] = {**entry.data, **entry.options}
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    _LOGGER.debug("Endpoint %s serving %s", API_PATH, entry.data[CONF_URL])
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    hass.data[DOMAIN].pop("settings", None)
+    return True
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+class SeriesView(HomeAssistantView):
+    """Return time series in the shape of HA long-term statistics."""
+
+    url = API_PATH
+    name = "api:influx_proxy:series"
+    # requires_auth defaults to True: the endpoint is protected like the rest
+    # of the HA API, the card needs no credentials of its own.
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+        self._slots = asyncio.Semaphore(MAX_CONCURRENT_QUERIES)
+
+    async def get(self, request: web.Request) -> web.Response:
+        settings: dict[str, Any] | None = self._hass.data.get(DOMAIN, {}).get("settings")
+        if settings is None:
+            return self.json_message("InfluxDB Proxy is not configured", 503)
+
+        raw = (request.query.get("entities") or "").strip()
+        # de-duplicated, order kept
+        entity_ids = list(dict.fromkeys(e.strip() for e in raw.split(",") if e.strip()))
+        if not entity_ids:
+            return self.json_message("missing parameter: entities", 400)
+        max_entities = int(settings.get(CONF_MAX_ENTITIES, DEFAULT_MAX_ENTITIES))
+        if len(entity_ids) > max_entities:
+            return self.json_message(f"too many entities (limit {max_entities})", 400)
+        if not all(valid_entity_id(e) for e in entity_ids):
+            return self.json_message("invalid entity_id", 400)
+        # Same entity permissions as the rest of the HA API (non-admin users
+        # have read access to all entities today, but policies may restrict it).
+        user = request.get("hass_user")
+        if user is not None and not all(user.permissions.check_entity(e, POLICY_READ) for e in entity_ids):
+            return self.json_message("not allowed", 403)
+
+        try:
+            days = float(request.query.get("days", "7"))
+        except ValueError:
+            return self.json_message("days must be a number", 400)
+        max_days = int(settings.get(CONF_MAX_DAYS, DEFAULT_MAX_DAYS))
+        if not 0 < days <= max_days:
+            return self.json_message(f"days out of range (0, {max_days}]", 400)
+
+        naming = MeasurementNaming(
+            mode=settings.get(CONF_MEASUREMENT_MODE, MEASUREMENT_UNIT),
+            default_measurement=settings.get(CONF_DEFAULT_MEASUREMENT, ""),
+            override_measurement=settings.get(CONF_OVERRIDE_MEASUREMENT, ""),
+        )
+        queries = []
+        queried = []
+        for entity_id in entity_ids:
+            state = self._hass.states.get(entity_id)
+            attrs = state.attributes if state is not None else {}
+            measurement = measurement_for(
+                entity_id,
+                attrs.get("unit_of_measurement"),
+                attrs.get("device_class"),
+                naming,
+            )
+            if unsafe_measurement(measurement):
+                # cannot exist in InfluxDB and would break the whole request
+                continue
+            queries.append(series_query(entity_id, measurement, days))
+            queried.append(entity_id)
+        if not queries:
+            return self.json({})
+
+        try:
+            async with self._slots:
+                payload = await run_query(
+                    async_get_clientsession(self._hass, settings.get("verify_ssl", True)),
+                    settings,
+                    ";".join(queries),
+                )
+        except InfluxError as err:
+            # detail (host, port, InfluxDB error text) only in the log -
+            # any logged-in user, admin or not, can call this endpoint
+            _LOGGER.warning("InfluxDB query failed: %s", err)
+            return self.json_message(f"InfluxDB query failed ({err.kind})", 502)
+        return self.json(parse_results(payload, queried))

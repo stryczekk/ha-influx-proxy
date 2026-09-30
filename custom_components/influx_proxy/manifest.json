@@ -1,0 +1,14 @@
+{
+  "domain": "influx_proxy",
+  "name": "InfluxDB Proxy",
+  "codeowners": ["@stryczekk"],
+  "config_flow": true,
+  "dependencies": ["http"],
+  "documentation": "https://github.com/stryczekk/ha-influx-proxy",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/stryczekk/ha-influx-proxy/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "1.0.0"
+}
