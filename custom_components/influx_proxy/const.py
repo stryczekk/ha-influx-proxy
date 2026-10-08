@@ -20,3 +20,9 @@ DEFAULT_MAX_ENTITIES = 12
 DEFAULT_MAX_DAYS = 800
 
 API_PATH = "/api/influx_proxy/series"
+API_STATES_PATH = "/api/influx_proxy/states"
+
+# /states returns raw rows, so it takes more entities (a room of lamps) and
+# caps the rows per entity instead.
+STATES_MAX_ENTITIES = 40
+STATES_ROW_LIMIT = 50000

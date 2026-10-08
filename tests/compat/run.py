@@ -88,6 +88,14 @@ def main() -> None:
     lines = [f"°C,domain=sensor,entity_id=compat_room value={20 + i}.0 {now_ns - (5 - i) * step}" for i in range(5)]
     lines += [f"°C,domain=number,entity_id=compat_room value=99 {now_ns - step}"]
     lines += [f"state,domain=sensor,entity_id=compat_no_unit value=1 {now_ns - step}"]
+    # A cover as HA writes it: string state, numeric value, attributes as
+    # fields. One change before the 1 h range, one inside it.
+    hour = 3600 * 10**9
+    lines += [
+        f'state,domain=cover,entity_id=compat_blind state="closed",value=0,current_position=0 {now_ns - 3 * hour}',
+        f'state,domain=cover,entity_id=compat_blind state="open",value=1,current_position=100 {now_ns - 10 * step}',
+        f'state,domain=switch,entity_id=compat_blind state="on",value=1 {now_ns - 5 * step}',
+    ]
     status, text = request("/write", {"db": DB, "precision": "ns"}, "\n".join(lines).encode())
     if status not in (200, 204):
         raise SystemExit(f"FAIL /write HTTP {status}: {text[:300]}")
@@ -115,6 +123,23 @@ def main() -> None:
     influxql(q.series_query("sensor.compat_room", hostile, 1))
     payload = influxql(q.series_query("sensor.compat_room", "°C", 1))
     checks.append(("injection attempt is a harmless empty query", bool(q.parse_results(payload, ["sensor.compat_room"]))))
+
+    # /states: row before the range + rows inside, oldest first, attributes
+    attrs = ("current_position",)
+    payload = influxql(";".join(q.states_queries("cover.compat_blind", "state", 1, attrs)))
+    rows = q.parse_states(payload, ["cover.compat_blind"], attrs).get("cover.compat_blind", [])
+    checks.append(("states: row before range + change inside, oldest first",
+                   [r[1:] for r in rows] == [["closed", 0], ["open", 100]] and rows[0][0] < rows[1][0]))
+    checks.append(("states: switch.* with same object id excluded", all(r[1] != "on" for r in rows)))
+    payload = influxql(";".join(q.states_queries("cover.compat_blind", "state", 1, ("no_such_attribute",))))
+    rows = q.parse_states(payload, ["cover.compat_blind"], ("no_such_attribute",)).get("cover.compat_blind", [])
+    checks.append(("states: unknown attribute is null, not an error", [r[1:] for r in rows] == [["closed", None], ["open", None]]))
+    payload = influxql(";".join(q.states_queries("sensor.compat_room", "°C", 1)))
+    rows = q.parse_states(payload, ["sensor.compat_room"]).get("sensor.compat_room", [])
+    checks.append(("states: numeric state read from value", [r[1] for r in rows] == [20.0, 21.0, 22.0, 23.0, 24.0]))
+    payload = influxql(";".join(q.states_queries("cover.compat_blind", "state", 1, (), limit=1)))
+    rows = q.parse_states(payload, ["cover.compat_blind"], (), limit=1).get("cover.compat_blind", [])
+    checks.append(("states: row limit keeps the newest rows", [r[1] for r in rows] == ["open"]))
 
     status, _ = request("/query", {"db": DB, "q": "SHOW MEASUREMENTS LIMIT 1"})
     checks.append(("config-flow connection test query works", status == 200))

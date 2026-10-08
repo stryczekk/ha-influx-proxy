@@ -159,3 +159,84 @@ def first_error(payload: dict) -> str | None:
         if item.get("error"):
             return str(item["error"])
     return None
+
+
+# --- raw state changes (/states) -------------------------------------------
+
+# Attribute fields a client may ask for next to the state. Home Assistant
+# writes numeric attributes as fields under their own name (strings get a
+# `_str` suffix), e.g. `current_position` of a cover or `brightness`.
+MAX_STATE_ATTRIBUTES = 4
+_ATTRIBUTE = re.compile(r"[a-z0-9_]{1,64}")
+
+
+def valid_attribute(name: str) -> bool:
+    return bool(_ATTRIBUTE.fullmatch(name))
+
+
+def states_queries(
+    entity_id: str, measurement: str, days: float, attributes: tuple[str, ...] = (), limit: int = 50000
+) -> list[str]:
+    """Two statements per entity: the last row BEFORE the range (the state the
+    range starts in) and the rows inside it, newest first so that a hit limit
+    cuts off the oldest rows, not the most recent ones.
+
+    `state` holds non-numeric states ("on", "open"), `value` numeric ones -
+    Home Assistant writes one or both, so both are read.
+    """
+    domain, object_id = entity_id.split(".", 1)
+    hours = max(1, int(round(days * 24)))
+    fields = ", ".join(quote_identifier(f) for f in ("state", "value", *attributes))
+    source = (
+        f"SELECT {fields} FROM {quote_identifier(measurement)} "
+        f"WHERE {quote_identifier('domain')} = {quote_string(domain)} "
+        f"AND {quote_identifier('entity_id')} = {quote_string(object_id)} "
+    )
+    return [
+        source + f"AND time <= now() - {hours}h ORDER BY time DESC LIMIT 1",
+        source + f"AND time > now() - {hours}h ORDER BY time DESC LIMIT {int(limit)}",
+    ]
+
+
+def _state_rows(item: dict, attributes: tuple[str, ...]) -> list[list]:
+    """Rows of one statement as [epoch_ms, state, *attributes].
+
+    Columns are read by name: InfluxDB returns them as asked, but a missing
+    field may be left out entirely by some versions.
+    """
+    rows = []
+    for series in item.get("series") or []:
+        columns = series.get("columns") or []
+        for values in series.get("values") or []:
+            row = dict(zip(columns, values))
+            state = row.get("state")
+            if state is None:
+                state = row.get("value")
+            if state is None:
+                continue
+            rows.append([row.get("time"), state, *(row.get(a) for a in attributes)])
+    return rows
+
+
+def parse_states(
+    payload: dict, order: list[str], attributes: tuple[str, ...] = (), limit: int = 50000
+) -> dict[str, list[list]]:
+    """Turn the paired statements of states_queries into
+    {entity_id: [[epoch_ms, state, *attributes], ...]}, oldest first.
+
+    When the range hit the row limit, the row before the range is dropped:
+    the data then starts at the first returned row, not at the range start.
+    """
+    results = payload.get("results") or []
+    out: dict[str, list[list]] = {}
+    for index, entity_id in enumerate(order):
+        pair = results[2 * index:2 * index + 2]
+        if len(pair) < 2:
+            break
+        before = _state_rows(pair[0], attributes)
+        inside = _state_rows(pair[1], attributes)
+        inside.sort(key=lambda r: r[0])
+        rows = inside if len(inside) >= limit else before[:1] + inside
+        if rows:
+            out[entity_id] = rows
+    return out

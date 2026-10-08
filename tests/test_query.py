@@ -122,5 +122,63 @@ class Results(unittest.TestCase):
         self.assertEqual(q.first_error([1, 2]), "unexpected response")
 
 
+class States(unittest.TestCase):
+    def test_two_statements_before_and_inside_the_range(self):
+        before, inside = q.states_queries("cover.kitchen", "state", 90, ("current_position",), 500)
+        for query in (before, inside):
+            self.assertIn('SELECT "state", "value", "current_position" FROM "state"', query)
+            self.assertIn("\"domain\" = 'cover' AND \"entity_id\" = 'kitchen'", query)
+        self.assertIn("time <= now() - 2160h ORDER BY time DESC LIMIT 1", before)
+        self.assertIn("time > now() - 2160h ORDER BY time DESC LIMIT 500", inside)
+
+    def test_attribute_names(self):
+        for a in ["current_position", "brightness", "a1"]:
+            self.assertTrue(q.valid_attribute(a), a)
+        for a in ["", "Brightness", 'x"', "a b", "a;b", "x" * 65, "a\n"]:
+            self.assertFalse(q.valid_attribute(a), a)
+
+    def test_injection_attempt_stays_inside_quotes(self):
+        query = q.states_queries("light.l", 'm" ; DROP DATABASE x ; "', 1)[1]
+        self.assertIn('FROM "m\\" ; DROP DATABASE x ; \\""', query)
+
+    @staticmethod
+    def _result(columns, *rows):
+        return {"series": [{"name": "state", "columns": columns, "values": list(rows)}]} if rows else {}
+
+    def test_parse_oldest_first_with_row_before_range(self):
+        cols = ["time", "state", "value", "current_position"]
+        payload = {"results": [
+            self._result(cols, [100, "closed", 0, 0]),
+            self._result(cols, [300, "open", 1, 100], [200, "opening", 1, 40]),
+            self._result(cols),
+            self._result(cols, [250, None, 21.5, None]),
+        ]}
+        out = q.parse_states(payload, ["cover.a", "sensor.b"], ("current_position",))
+        self.assertEqual(out["cover.a"], [[100, "closed", 0], [200, "opening", 40], [300, "open", 100]])
+        # numeric state comes from `value`
+        self.assertEqual(out["sensor.b"], [[250, 21.5, None]])
+
+    def test_missing_columns_and_empty_rows(self):
+        payload = {"results": [
+            self._result(["time", "state"], [100, "on"]),
+            self._result(["time", "state", "value"], [200, None, None], [150, "off", 0]),
+        ]}
+        out = q.parse_states(payload, ["light.a"], ("brightness",))
+        self.assertEqual(out["light.a"], [[100, "on", None], [150, "off", None]])
+
+    def test_entity_without_rows_is_omitted(self):
+        payload = {"results": [{}, {}]}
+        self.assertEqual(q.parse_states(payload, ["light.a"]), {})
+
+    def test_hit_limit_drops_row_before_range(self):
+        cols = ["time", "state"]
+        payload = {"results": [
+            self._result(cols, [100, "off"]),
+            self._result(cols, [300, "on"], [200, "off"]),
+        ]}
+        self.assertEqual(q.parse_states(payload, ["light.a"], (), limit=2)["light.a"], [[200, "off"], [300, "on"]])
+        self.assertEqual(q.parse_states(payload, ["light.a"], (), limit=3)["light.a"][0], [100, "off"])
+
+
 if __name__ == "__main__":
     unittest.main()

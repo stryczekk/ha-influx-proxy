@@ -7,6 +7,7 @@ Home Assistant itself**, so it works everywhere your dashboard works.
 
 ```
 GET /api/influx_proxy/series?entities=sensor.living_room_temperature,sensor.outside_temperature&days=30
+GET /api/influx_proxy/states?entities=light.kitchen,cover.bedroom&days=90&attributes=current_position
 ```
 
 ## Why
@@ -23,7 +24,7 @@ back **into a dashboard** is surprisingly awkward:
   needs a password in its configuration, visible to every admin.
 - **CORS**, mixed content (HTTPS dashboard, HTTP database), and so on.
 
-This integration adds one endpoint **inside** Home Assistant. Cards call
+This integration adds two endpoints **inside** Home Assistant. Cards call
 it with your normal Home Assistant session; Home Assistant queries
 InfluxDB on the server side.
 
@@ -35,6 +36,8 @@ InfluxDB on the server side.
 - ✅ response in the same shape as Home Assistant long-term statistics
   (`start`, `end`, `mean`, `min`, `max`), so a card can treat both sources
   the same way
+- ✅ raw state changes too — count how long a light was on or a cover
+  closed over three months, not just the days the recorder keeps
 
 > This is a building block for **custom cards**. It does not draw charts on
 > its own — see [Using it from a card](#using-it-from-a-card).
@@ -95,7 +98,9 @@ share a measurement such as `°C`.
 
 ## API
 
-`GET /api/influx_proxy/series`
+### Aggregated series — `GET /api/influx_proxy/series`
+
+For numeric sensors (temperature, power, …).
 
 | Parameter | Meaning |
 |---|---|
@@ -127,8 +132,46 @@ merged. Errors come back as `{"message": "..."}`:
 | 502 | InfluxDB failed — only a category is returned (`cannot_connect`, `invalid_auth`, `query_failed`, …); host, port and the database's error text go to the Home Assistant log |
 | 503 | not configured, or briefly while the entry reloads after an options change |
 
-At most four queries run against InfluxDB at the same time; further
-requests wait.
+### Raw state changes — `GET /api/influx_proxy/states`
+
+For on/off, open/closed and similar entities: every state change in the
+range, not aggregated.
+
+| Parameter | Meaning |
+|---|---|
+| `entities` | comma-separated entity ids, up to 40 |
+| `days` | time range, may be fractional; default 30, limit as above |
+| `attributes` | optional, up to 4 attribute names to return next to the state, e.g. `current_position`, `brightness` |
+
+Response — rows `[time_ms, state, ...attributes]`, oldest first:
+
+```json
+{
+  "cover.bedroom": [
+    [1790000000000, "closed", 0],
+    [1790003600000, "open", 100]
+  ]
+}
+```
+
+- The **first row is the last change before the range** (when there is
+  one), so the state the range starts in is known.
+- `state` is the string state (`"on"`, `"open"`); for entities with a
+  numeric state the number is returned instead.
+- Attributes come from the fields the `influxdb` integration writes for
+  numeric attributes; an attribute that was never written is `null`.
+- Every write is a row — the `influxdb` integration also writes on
+  attribute-only changes, so consecutive rows may repeat the state.
+- At most 50 000 rows per entity. When a range has more, the **newest**
+  rows are kept and the row before the range is left out: the data then
+  starts at the first returned row.
+
+Entities without data are omitted. Errors as for `/series`.
+
+### Limits
+
+At most four queries run against InfluxDB at the same time (both
+endpoints together); further requests wait.
 
 ## Using it from a card
 
@@ -139,6 +182,18 @@ const data = await this.hass.callApi(
   "GET",
   "influx_proxy/series?entities=" + encodeURIComponent("sensor.a,sensor.b") + "&days=30"
 );
+
+// how many hours a light was on in the last 90 days
+const rows = (await this.hass.callApi(
+  "GET", "influx_proxy/states?entities=light.kitchen&days=90"
+))["light.kitchen"] || [];
+const from = Date.now() - 90 * 86400e3;
+let on = 0;
+rows.forEach(([t, state], i) => {
+  const end = i + 1 < rows.length ? rows[i + 1][0] : Date.now();
+  if (state === "on") on += end - Math.max(t, from);
+});
+console.log(on / 3600e3, "h");
 ```
 
 ## Compatibility
@@ -147,20 +202,23 @@ const data = await this.hass.callApi(
 |---|---|---|
 | 1.8.10 | ✅ tested | none |
 | 2.7.12 | ✅ tested — v1 compatibility API; each bucket is automatically usable as a database of the same name | token |
-| 3 Core 3.11.5 | ✅ tested — InfluxQL over `/query` | none (`--without-auth`) |
+| 3 Core 3.11.5, 3.12.0 | ✅ tested — InfluxQL over `/query` | none (`--without-auth`) |
 
 The test (`tests/compat/run.py`) writes points shaped exactly like Home
 Assistant's `influxdb` integration writes them and reads them back with the
 integration's own query code: series found, `number.*` with the same object
 id not mixed in, all values present, default measurement for entities
 without a unit, injection attempt harmless, config-flow connection test
-query working.
+query working; for `/states`: the row before the range, oldest-first order,
+attributes, an unknown attribute as `null`, numeric states and the row
+limit keeping the newest rows (11 checks, 1.1.0 on 1.8.10, 2.7.12 and
+3 Core 3.12.0).
 
 ## Tests
 
 | Suite | What it covers | Needs |
 |---|---|---|
-| `tests/test_query.py` | query building, InfluxQL escaping, measurement naming, result parsing | nothing (`python -m unittest discover -s tests`) |
+| `tests/test_query.py` | query building, InfluxQL escaping, measurement naming, result parsing (both endpoints) | nothing (`python -m unittest discover -s tests`) |
 | `tests/compat/run.py` | the integration's queries against a **real InfluxDB** 1.8 / 2.7 / 3 Core | an InfluxDB |
 | `tests/e2e/flow.py` | **config flow as the UI drives it** (fields, credentials in URL, `invalid_url`, `invalid_auth`, `cannot_connect`, single instance), options flow and reload, endpoint validation, limits, duplicates, 401 without session, 503 after removal | a **test** Home Assistant + InfluxDB, `E2E_TEST_INSTANCE=1` (it deletes entries) |
 | `tests/e2e/yaml_import.py` | legacy YAML import, no duplicate on restart, repair issue shown and withdrawn, cleanup | a **test** Home Assistant, `E2E_TEST_INSTANCE=1` (it edits `configuration.yaml` and restarts) |
