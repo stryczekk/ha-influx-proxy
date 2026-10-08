@@ -10,6 +10,7 @@ CONF_DEFAULT_MEASUREMENT = "default_measurement"
 CONF_OVERRIDE_MEASUREMENT = "override_measurement"
 CONF_MAX_ENTITIES = "max_entities"
 CONF_MAX_DAYS = "max_days"
+CONF_MAX_STATE_ROWS = "max_state_rows"
 
 AUTH_NONE = "none"
 AUTH_BASIC = "basic"
@@ -23,6 +24,8 @@ API_PATH = "/api/influx_proxy/series"
 API_STATES_PATH = "/api/influx_proxy/states"
 
 # /states returns raw rows, so it takes more entities (a room of lamps) and
-# caps the rows per entity instead.
+# caps the rows per entity instead (configurable). A busy presence sensor
+# writes ~700 rows a day: half a year (a range plus the one before it, to
+# compare) is ~130 000 rows - the default has to leave room for that.
 STATES_MAX_ENTITIES = 40
-STATES_ROW_LIMIT = 50000
+DEFAULT_MAX_STATE_ROWS = 250000

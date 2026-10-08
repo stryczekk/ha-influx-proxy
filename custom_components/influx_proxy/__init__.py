@@ -40,14 +40,15 @@ from .const import (
     CONF_DEFAULT_MEASUREMENT,
     CONF_MAX_DAYS,
     CONF_MAX_ENTITIES,
+    CONF_MAX_STATE_ROWS,
     CONF_MEASUREMENT_MODE,
     CONF_OVERRIDE_MEASUREMENT,
     DEFAULT_DATABASE,
     DEFAULT_MAX_DAYS,
     DEFAULT_MAX_ENTITIES,
+    DEFAULT_MAX_STATE_ROWS,
     DOMAIN,
     STATES_MAX_ENTITIES,
-    STATES_ROW_LIMIT,
 )
 from .query import (
     MAX_STATE_ATTRIBUTES,
@@ -268,10 +269,9 @@ class StatesView(_InfluxView):
         targets = self._measurements(settings, entity_ids)
         if not targets:
             return self.json({})
-        queries = [
-            q for e, m in targets for q in states_queries(e, m, days, attributes, STATES_ROW_LIMIT)
-        ]
+        limit = int(settings.get(CONF_MAX_STATE_ROWS, DEFAULT_MAX_STATE_ROWS))
+        queries = [q for e, m in targets for q in states_queries(e, m, days, attributes, limit)]
         payload = await self._query(settings, queries)
         if isinstance(payload, web.Response):
             return payload
-        return self.json(parse_states(payload, [e for e, _ in targets], attributes, STATES_ROW_LIMIT))
+        return self.json(parse_states(payload, [e for e, _ in targets], attributes, limit))

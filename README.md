@@ -162,7 +162,8 @@ Response — rows `[time_ms, state, ...attributes]`, oldest first:
   numeric attributes; an attribute that was never written is `null`.
 - Every write is a row — the `influxdb` integration also writes on
   attribute-only changes, so consecutive rows may repeat the state.
-- At most 50 000 rows per entity. When a range has more, the **newest**
+- At most 250 000 rows per entity by default — **Configure → Max state
+  changes per entity** (half a year of a busy presence sensor is ~130 000). When a range has more, the **newest**
   rows are kept and the row before the range is left out: the data then
   starts at the first returned row.
 

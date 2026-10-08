@@ -34,12 +34,14 @@ from .const import (
     CONF_DEFAULT_MEASUREMENT,
     CONF_MAX_DAYS,
     CONF_MAX_ENTITIES,
+    CONF_MAX_STATE_ROWS,
     CONF_MEASUREMENT_MODE,
     CONF_OVERRIDE_MEASUREMENT,
     CONF_TOKEN,
     DEFAULT_DATABASE,
     DEFAULT_MAX_DAYS,
     DEFAULT_MAX_ENTITIES,
+    DEFAULT_MAX_STATE_ROWS,
     DOMAIN,
 )
 from .query import MEASUREMENT_MODES, MEASUREMENT_UNIT
@@ -220,6 +222,11 @@ class InfluxProxyOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_MAX_DAYS, default=o.get(CONF_MAX_DAYS, DEFAULT_MAX_DAYS)
                     ): NumberSelector(NumberSelectorConfig(min=1, max=3650, mode=NumberSelectorMode.BOX)),
+                    vol.Required(
+                        CONF_MAX_STATE_ROWS, default=o.get(CONF_MAX_STATE_ROWS, DEFAULT_MAX_STATE_ROWS)
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1000, max=5000000, step=1000, mode=NumberSelectorMode.BOX)
+                    ),
                 }
             ),
         )

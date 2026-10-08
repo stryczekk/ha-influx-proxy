@@ -48,14 +48,16 @@
           "default_measurement": "Domyślny pomiar",
           "override_measurement": "Wymuszony pomiar",
           "max_entities": "Maks. encji w zapytaniu",
-          "max_days": "Maks. dni w zapytaniu"
+          "max_days": "Maks. dni w zapytaniu",
+          "max_state_rows": "Maks. zmian stanu na encję"
         },
         "data_description": {
           "measurement_mode": "Jednostka: wszystkie temperatury w „°C”, wilgotność w „%” — tak zapisuje Home Assistant, jeśli tego nie zmieniałeś. entity_id: każda encja we własnym pomiarze. Domena i klasa: np. „sensor__temperature”.",
           "default_measurement": "Dla encji, dla których reguła wyżej nie daje nazwy, np. bez jednostki (włączone/wyłączone, tryby). To samo co „default_measurement” w integracji InfluxDB, często „state”. Puste = nazwą jest entity_id.",
           "override_measurement": "Czyta wszystkie encje z tego jednego pomiaru, reguły wyżej są pomijane. To samo co „override_measurement” w integracji InfluxDB. Zwykle puste.",
           "max_entities": "Ile encji karta może pobrać naraz — bezpiecznik przed przeciążeniem bazy.",
-          "max_days": "Jak daleko wstecz sięga jedno zapytanie (800 dni ≈ 2 lata)."
+          "max_days": "Jak daleko wstecz sięga jedno zapytanie (800 dni ≈ 2 lata).",
+          "max_state_rows": "Surowe zmiany stanu (endpoint /states): najwyżej tyle wierszy na encję w jednym zapytaniu; gdy w zakresie jest więcej, zostają najnowsze. Ruchliwy czujnik ruchu zapisuje ok. 700 dziennie."
         }
       }
     }

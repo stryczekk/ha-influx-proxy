@@ -175,7 +175,7 @@ def valid_attribute(name: str) -> bool:
 
 
 def states_queries(
-    entity_id: str, measurement: str, days: float, attributes: tuple[str, ...] = (), limit: int = 50000
+    entity_id: str, measurement: str, days: float, attributes: tuple[str, ...] = (), limit: int = 250000
 ) -> list[str]:
     """Two statements per entity: the last row BEFORE the range (the state the
     range starts in) and the rows inside it, newest first so that a hit limit
@@ -219,7 +219,7 @@ def _state_rows(item: dict, attributes: tuple[str, ...]) -> list[list]:
 
 
 def parse_states(
-    payload: dict, order: list[str], attributes: tuple[str, ...] = (), limit: int = 50000
+    payload: dict, order: list[str], attributes: tuple[str, ...] = (), limit: int = 250000
 ) -> dict[str, list[list]]:
     """Turn the paired statements of states_queries into
     {entity_id: [[epoch_ms, state, *attributes], ...]}, oldest first.

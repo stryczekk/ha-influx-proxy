@@ -48,14 +48,16 @@
           "default_measurement": "Default measurement",
           "override_measurement": "Override measurement",
           "max_entities": "Max entities per request",
-          "max_days": "Max days per request"
+          "max_days": "Max days per request",
+          "max_state_rows": "Max state changes per entity"
         },
         "data_description": {
           "measurement_mode": "Unit: all temperatures in \"°C\", humidity in \"%\" - what Home Assistant does unless you changed it. entity_id: every entity in its own measurement. Domain and device class: e.g. \"sensor__temperature\".",
           "default_measurement": "For entities the rule above gives no name for, e.g. without a unit (on/off states, modes). Same as \"default_measurement\" in the InfluxDB integration, often \"state\". Empty = the entity_id.",
           "override_measurement": "Reads every entity from this one measurement and ignores the rules above. Same as \"override_measurement\" in the InfluxDB integration. Usually empty.",
           "max_entities": "How many entities a card may fetch at once - a guard against overloading the database.",
-          "max_days": "How far back one request may go (800 days = about 2 years)."
+          "max_days": "How far back one request may go (800 days = about 2 years).",
+          "max_state_rows": "Raw state changes (/states endpoint): at most this many rows per entity in one request; when a range has more, the newest are kept. A busy motion sensor writes ~700 a day."
         }
       }
     }
