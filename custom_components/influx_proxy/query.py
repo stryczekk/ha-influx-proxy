@@ -8,6 +8,7 @@ here from an entity_id and a time range, with proper InfluxQL quoting.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 
 # Option VALUES as stored in the config entry. hassfest rejects "__" in
@@ -98,23 +99,46 @@ def group_interval(days: float) -> str:
     return "1d"
 
 
-def series_query(entity_id: str, measurement: str, days: float) -> str:
+def _rfc3339(ms: int) -> str:
+    """Epoch milliseconds as an RFC 3339 UTC timestamp with milliseconds."""
+    secs, milli = divmod(int(ms), 1000)
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(secs)) + f".{milli:03d}Z"
+
+
+def range_clauses(days: float, window: tuple[int, int] | None = None) -> tuple[str, str]:
+    """WHERE clauses for the rows inside the range and for the row before it.
+
+    Either the last `days` up to now, or a `window` of two epoch milliseconds
+    (start exclusive, end inclusive) - a given day, for example.
+    """
+    if window is not None:
+        # RFC 3339 string literals: understood by every InfluxQL (1.x, 2.x's v1 API, 3.x)
+        start, end = (_rfc3339(window[0]), _rfc3339(window[1]))
+        return f"AND time > '{start}' AND time <= '{end}' ", f"AND time <= '{start}' "
+    # InfluxQL duration literals must be integers ("30.0d" is a syntax
+    # error); counting in hours also allows ranges shorter than a day.
+    hours = max(1, int(round(days * 24)))
+    return f"AND time > now() - {hours}h ", f"AND time <= now() - {hours}h "
+
+
+def series_query(
+    entity_id: str, measurement: str, days: float, window: tuple[int, int] | None = None
+) -> str:
     """Mean/min/max of the `value` field, grouped for the requested range.
 
     Filters on both tags Home Assistant writes: `domain` and `entity_id`
     (the object id, without the domain) - otherwise sensor.x and
-    binary_sensor.x would be merged into one series.
+    binary_sensor.x would be merged into one series. `days` is the length of
+    the range (it picks the grouping), `window` an optional fixed range.
     """
     domain, object_id = entity_id.split(".", 1)
-    # InfluxQL duration literals must be integers ("30.0d" is a syntax
-    # error); counting in hours also allows ranges shorter than a day.
-    hours = max(1, int(round(days * 24)))
+    inside, _ = range_clauses(days, window)
     return (
         'SELECT mean("value"), min("value"), max("value") '
         f"FROM {quote_identifier(measurement)} "
         f"WHERE {quote_identifier('domain')} = {quote_string(domain)} "
         f"AND {quote_identifier('entity_id')} = {quote_string(object_id)} "
-        f"AND time > now() - {hours}h "
+        f"{inside}"
         f"GROUP BY time({group_interval(days)}) fill(none)"
     )
 
@@ -175,7 +199,12 @@ def valid_attribute(name: str) -> bool:
 
 
 def states_queries(
-    entity_id: str, measurement: str, days: float, attributes: tuple[str, ...] = (), limit: int = 250000
+    entity_id: str,
+    measurement: str,
+    days: float,
+    attributes: tuple[str, ...] = (),
+    limit: int = 250000,
+    window: tuple[int, int] | None = None,
 ) -> list[str]:
     """Two statements per entity: the last row BEFORE the range (the state the
     range starts in) and the rows inside it, newest first so that a hit limit
@@ -185,7 +214,7 @@ def states_queries(
     Home Assistant writes one or both, so both are read.
     """
     domain, object_id = entity_id.split(".", 1)
-    hours = max(1, int(round(days * 24)))
+    inside, before = range_clauses(days, window)
     fields = ", ".join(quote_identifier(f) for f in ("state", "value", *attributes))
     source = (
         f"SELECT {fields} FROM {quote_identifier(measurement)} "
@@ -193,8 +222,8 @@ def states_queries(
         f"AND {quote_identifier('entity_id')} = {quote_string(object_id)} "
     )
     return [
-        source + f"AND time <= now() - {hours}h ORDER BY time DESC LIMIT 1",
-        source + f"AND time > now() - {hours}h ORDER BY time DESC LIMIT {int(limit)}",
+        source + before + "ORDER BY time DESC LIMIT 1",
+        source + inside + f"ORDER BY time DESC LIMIT {int(limit)}",
     ]
 
 

@@ -141,6 +141,22 @@ def main() -> None:
     rows = q.parse_states(payload, ["cover.compat_blind"], (), limit=1).get("cover.compat_blind", [])
     checks.append(("states: row limit keeps the newest rows", [r[1] for r in rows] == ["open"]))
 
+    # a fixed window (start/end, 1.2.0): the closed row 3 h ago is before a window of the last 2 h,
+    # the open one 10 min ago inside; a window 4 h..2 h ago holds only the closed one
+    now_ms = now_ns // 10**6
+    win = (now_ms - 2 * 3600 * 1000, now_ms)
+    payload = influxql(";".join(q.states_queries("cover.compat_blind", "state", 2 / 24, attrs, window=win)))
+    rows = q.parse_states(payload, ["cover.compat_blind"], attrs).get("cover.compat_blind", [])
+    checks.append(("states: fixed window - row before + change inside",
+                   [r[1:] for r in rows] == [["closed", 0], ["open", 100]]))
+    win = (now_ms - 4 * 3600 * 1000, now_ms - 2 * 3600 * 1000)
+    payload = influxql(";".join(q.states_queries("cover.compat_blind", "state", 2 / 24, attrs, window=win)))
+    rows = q.parse_states(payload, ["cover.compat_blind"], attrs).get("cover.compat_blind", [])
+    checks.append(("states: fixed window in the past - only what was inside", [r[1:] for r in rows] == [["closed", 0]]))
+    payload = influxql(q.series_query("sensor.compat_room", "°C", 1 / 24, (now_ms - 3600 * 1000, now_ms + 1000)))
+    points = q.parse_results(payload, ["sensor.compat_room"]).get("sensor.compat_room", [])
+    checks.append(("series: fixed window", bool(points) and max(p["max"] for p in points) == 24))
+
     status, _ = request("/query", {"db": DB, "q": "SHOW MEASUREMENTS LIMIT 1"})
     checks.append(("config-flow connection test query works", status == 200))
 

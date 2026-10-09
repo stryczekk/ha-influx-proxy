@@ -8,6 +8,7 @@ Home Assistant itself**, so it works everywhere your dashboard works.
 ```
 GET /api/influx_proxy/series?entities=sensor.living_room_temperature,sensor.outside_temperature&days=30
 GET /api/influx_proxy/states?entities=light.kitchen,cover.bedroom&days=90&attributes=current_position
+GET /api/influx_proxy/states?entities=light.kitchen&start=1767225600000&end=1767312000000
 ```
 
 ## Why
@@ -106,6 +107,7 @@ For numeric sensors (temperature, power, …).
 |---|---|
 | `entities` | comma-separated entity ids (limit configurable, default 12) |
 | `days` | time range, may be fractional (`0.5` = 12 h); limit default 800 |
+| `start`, `end` | instead of `days`: a fixed range in epoch milliseconds (`end` defaults to now); its length counts against the same limit |
 
 Aggregation step is chosen automatically: 5 min for a day, 30 min for a
 week, 2 h for a month, 6 h up to ~4 months, 1 day beyond.
@@ -141,6 +143,7 @@ range, not aggregated.
 |---|---|
 | `entities` | comma-separated entity ids, up to 40 |
 | `days` | time range, may be fractional; default 30, limit as above |
+| `start`, `end` | instead of `days`: a fixed range in epoch milliseconds (`end` defaults to now) — one day months ago without fetching everything since |
 | `attributes` | optional, up to 4 attribute names to return next to the state, e.g. `current_position`, `brightness` |
 
 Response — rows `[time_ms, state, ...attributes]`, oldest first:
@@ -155,7 +158,8 @@ Response — rows `[time_ms, state, ...attributes]`, oldest first:
 ```
 
 - The **first row is the last change before the range** (when there is
-  one), so the state the range starts in is known.
+  one), so the state the range starts in is known — also for a `start`/`end`
+  range: replaying any past day starts from the right state.
 - `state` is the string state (`"on"`, `"open"`); for entities with a
   numeric state the number is returned instead.
 - Attributes come from the fields the `influxdb` integration writes for
@@ -194,6 +198,12 @@ rows.forEach(([t, state], i) => {
   const end = i + 1 < rows.length ? rows[i + 1][0] : Date.now();
   if (state === "on") on += end - Math.max(t, from);
 });
+
+// one past day, e.g. to replay it: the first row is the state at midnight
+const day = new Date(2026, 0, 15).getTime();
+const replay = await this.hass.callApi(
+  "GET", `influx_proxy/states?entities=light.kitchen&start=${day}&end=${day + 86400e3}`
+);
 console.log(on / 3600e3, "h");
 ```
 
@@ -212,8 +222,9 @@ id not mixed in, all values present, default measurement for entities
 without a unit, injection attempt harmless, config-flow connection test
 query working; for `/states`: the row before the range, oldest-first order,
 attributes, an unknown attribute as `null`, numeric states and the row
-limit keeping the newest rows (11 checks, 1.1.0 on 1.8.10, 2.7.12 and
-3 Core 3.12.0).
+limit keeping the newest rows; a fixed `start`/`end` range for both
+endpoints (14 checks, 1.2.0 on 1.8.10 and the current 2.7 and 3 Core
+images of 2026-10-09).
 
 ## Tests
 

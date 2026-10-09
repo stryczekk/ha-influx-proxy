@@ -90,6 +90,11 @@ class SeriesQuery(unittest.TestCase):
         self.assertIn("now() - 1h", q.series_query("sensor.t", "°C", 0.01))
         self.assertIn("now() - 12h", q.series_query("sensor.t", "°C", 0.5))
 
+    def test_series_fixed_window(self):
+        query = q.series_query("sensor.t", "°C", 1, (1790000000000, 1790086400000))
+        self.assertIn("time > '2026-09-21T14:13:20.000Z' AND time <= '2026-09-22T14:13:20.000Z' GROUP BY time(5m)", query)
+        self.assertNotIn("now()", query)
+
     def test_group_interval(self):
         self.assertEqual(q.group_interval(1), "5m")
         self.assertEqual(q.group_interval(7), "30m")
@@ -130,6 +135,12 @@ class States(unittest.TestCase):
             self.assertIn("\"domain\" = 'cover' AND \"entity_id\" = 'kitchen'", query)
         self.assertIn("time <= now() - 2160h ORDER BY time DESC LIMIT 1", before)
         self.assertIn("time > now() - 2160h ORDER BY time DESC LIMIT 500", inside)
+
+    def test_fixed_window(self):
+        before, inside = q.states_queries("light.kitchen", "state", 1, (), 500, (1790000000000, 1790086400000))
+        self.assertIn("time <= '2026-09-21T14:13:20.000Z' ORDER BY time DESC LIMIT 1", before)
+        self.assertIn("time > '2026-09-21T14:13:20.000Z' AND time <= '2026-09-22T14:13:20.000Z' ORDER BY time DESC LIMIT 500", inside)
+        self.assertNotIn("now()", before + inside)
 
     def test_attribute_names(self):
         for a in ["current_position", "brightness", "a1"]:

@@ -9,6 +9,7 @@ database password ever reaching the browser.
 
     GET /api/influx_proxy/series?entities=sensor.a,sensor.b&days=30
     GET /api/influx_proxy/states?entities=light.a,cover.b&days=90&attributes=current_position
+    GET /api/influx_proxy/states?entities=light.a&start=1790000000000&end=1790086400000
 
 The endpoints build every query themselves from entity ids; they do not
 accept InfluxQL from the client.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from aiohttp import web
@@ -151,7 +153,7 @@ class _InfluxView(HomeAssistantView):
 
     def _parse(
         self, request: web.Request, settings: dict[str, Any], max_entities: int, default_days: str
-    ) -> tuple[list[str], float] | web.Response:
+    ) -> tuple[list[str], float, tuple[int, int] | None] | web.Response:
         raw = (request.query.get("entities") or "").strip()
         # de-duplicated, order kept
         entity_ids = list(dict.fromkeys(e.strip() for e in raw.split(",") if e.strip()))
@@ -167,14 +169,31 @@ class _InfluxView(HomeAssistantView):
         if user is not None and not all(user.permissions.check_entity(e, POLICY_READ) for e in entity_ids):
             return self.json_message("not allowed", 403)
 
+        max_days = int(settings.get(CONF_MAX_DAYS, DEFAULT_MAX_DAYS))
+        # A fixed range: start (and optionally end, default now) in epoch
+        # milliseconds - e.g. one day months ago without fetching everything since.
+        if "start" in request.query:
+            now_ms = int(time.time() * 1000)
+            try:
+                start = int(request.query["start"])
+                end = int(request.query.get("end", now_ms))
+            except ValueError:
+                return self.json_message("start and end must be epoch milliseconds", 400)
+            if not 0 < start < end:
+                return self.json_message("start must be positive and before end", 400)
+            days = (end - start) / 86400000
+            if days > max_days:
+                return self.json_message(f"range longer than {max_days} days", 400)
+            return entity_ids, days, (start, end)
+        if "end" in request.query:
+            return self.json_message("end needs start", 400)
         try:
             days = float(request.query.get("days", default_days))
         except ValueError:
             return self.json_message("days must be a number", 400)
-        max_days = int(settings.get(CONF_MAX_DAYS, DEFAULT_MAX_DAYS))
         if not 0 < days <= max_days:
             return self.json_message(f"days out of range (0, {max_days}]", 400)
-        return entity_ids, days
+        return entity_ids, days, None
 
     def _measurements(self, settings: dict[str, Any], entity_ids: list[str]) -> list[tuple[str, str]]:
         """(entity_id, measurement) for every entity that can be queried."""
@@ -232,12 +251,12 @@ class SeriesView(_InfluxView):
         )
         if isinstance(parsed, web.Response):
             return parsed
-        entity_ids, days = parsed
+        entity_ids, days, window = parsed
 
         targets = self._measurements(settings, entity_ids)
         if not targets:
             return self.json({})
-        payload = await self._query(settings, [series_query(e, m, days) for e, m in targets])
+        payload = await self._query(settings, [series_query(e, m, days, window) for e, m in targets])
         if isinstance(payload, web.Response):
             return payload
         return self.json(parse_results(payload, [e for e, _ in targets]))
@@ -257,7 +276,7 @@ class StatesView(_InfluxView):
         parsed = self._parse(request, settings, STATES_MAX_ENTITIES, "30")
         if isinstance(parsed, web.Response):
             return parsed
-        entity_ids, days = parsed
+        entity_ids, days, window = parsed
 
         raw = (request.query.get("attributes") or "").strip()
         attributes = tuple(dict.fromkeys(a.strip() for a in raw.split(",") if a.strip()))
@@ -270,7 +289,7 @@ class StatesView(_InfluxView):
         if not targets:
             return self.json({})
         limit = int(settings.get(CONF_MAX_STATE_ROWS, DEFAULT_MAX_STATE_ROWS))
-        queries = [q for e, m in targets for q in states_queries(e, m, days, attributes, limit)]
+        queries = [q for e, m in targets for q in states_queries(e, m, days, attributes, limit, window)]
         payload = await self._query(settings, queries)
         if isinstance(payload, web.Response):
             return payload
