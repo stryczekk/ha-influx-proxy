@@ -95,6 +95,8 @@ def main() -> None:
         f'state,domain=cover,entity_id=compat_blind state="closed",value=0,current_position=0 {now_ns - 3 * hour}',
         f'state,domain=cover,entity_id=compat_blind state="open",value=1,current_position=100 {now_ns - 10 * step}',
         f'state,domain=switch,entity_id=compat_blind state="on",value=1 {now_ns - 5 * step}',
+        # last change 3 days ago: outside the first lookback, found by the second search
+        f'state,domain=light,entity_id=compat_quiet state="on",value=1 {now_ns - 72 * hour}',
     ]
     status, text = request("/write", {"db": DB, "precision": "ns"}, "\n".join(lines).encode())
     if status not in (200, 204):
@@ -140,6 +142,15 @@ def main() -> None:
     payload = influxql(";".join(q.states_queries("cover.compat_blind", "state", 1, (), limit=1)))
     rows = q.parse_states(payload, ["cover.compat_blind"], (), limit=1).get("cover.compat_blind", [])
     checks.append(("states: row limit keeps the newest rows", [r[1] for r in rows] == ["open"]))
+
+    # the row before the range further back than the lookback (2.0): first search empty, second finds it
+    payload = influxql(";".join(q.states_queries("light.compat_quiet", "state", 1)))
+    missing = q.missing_before(payload, ["light.compat_quiet"])
+    rows = q.parse_states(payload, ["light.compat_quiet"])
+    payload = influxql(q.before_query("light.compat_quiet", "state", 1))
+    rows = q.merge_before(rows, payload, missing).get("light.compat_quiet", [])
+    checks.append(("states: row before found beyond the lookback", missing == ["light.compat_quiet"]
+                   and [r[1] for r in rows] == ["on"]))
 
     # a fixed window (start/end, 1.2.0): the closed row 3 h ago is before a window of the last 2 h,
     # the open one 10 min ago inside; a window 4 h..2 h ago holds only the closed one

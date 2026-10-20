@@ -58,7 +58,10 @@ from .query import (
     MAX_STATE_ATTRIBUTES,
     MEASUREMENT_UNIT,
     MeasurementNaming,
+    before_query,
     measurement_for,
+    merge_before,
+    missing_before,
     parse_results,
     parse_states,
     series_query,
@@ -147,6 +150,11 @@ def _answer(body: bytes, build: Callable[[dict[str, Any]], Any]) -> bytes:
     return json_bytes(build(decode(body)))
 
 
+def _build(body: bytes, build: Callable[[dict[str, Any]], Any]) -> Any:
+    """Decode an InfluxDB body and shape it (executor job)."""
+    return build(decode(body))
+
+
 class _InfluxView(HomeAssistantView):
     """Shared request validation and query execution."""
 
@@ -225,15 +233,26 @@ class _InfluxView(HomeAssistantView):
             out.append((entity_id, measurement))
         return out
 
+    async def _fetch(
+        self, settings: dict[str, Any], queries: list[str], build: Callable[[dict[str, Any]], Any]
+    ) -> Any:
+        """Run the queries, return `build(payload)`.
+
+        Decoding the body and parsing it into rows can take a while for long
+        ranges, so it runs in an executor job, never on the event loop.
+        """
+        async with self._slots:
+            body = await run_query(
+                async_get_clientsession(self._hass, settings.get("verify_ssl", True)),
+                settings,
+                ";".join(queries),
+            )
+        return await self._hass.async_add_executor_job(_build, body, build)
+
     async def _query(
         self, settings: dict[str, Any], queries: list[str], build: Callable[[dict[str, Any]], Any]
     ) -> web.Response:
-        """Run the queries and answer with `build(payload)` as JSON.
-
-        Decoding the body, parsing it into rows and serializing the answer can
-        take a while for long ranges, so all of it runs in an executor job,
-        never on the event loop.
-        """
+        """Run the queries and answer with `build(payload)` as JSON."""
         try:
             async with self._slots:
                 body = await run_query(
@@ -243,11 +262,14 @@ class _InfluxView(HomeAssistantView):
                 )
             out = await self._hass.async_add_executor_job(_answer, body, build)
         except InfluxError as err:
-            # detail (host, port, InfluxDB error text) only in the log -
-            # any logged-in user, admin or not, can call these endpoints
-            _LOGGER.warning("InfluxDB query failed: %s", err)
-            return self.json_message(f"InfluxDB query failed ({err.kind})", 502)
+            return self._failed(err)
         return web.Response(body=out, content_type=CONTENT_TYPE_JSON)
+
+    def _failed(self, err: InfluxError) -> web.Response:
+        # detail (host, port, InfluxDB error text) only in the log -
+        # any logged-in user, admin or not, can call these endpoints
+        _LOGGER.warning("InfluxDB query failed: %s", err)
+        return self.json_message(f"InfluxDB query failed ({err.kind})", 502)
 
     def _settings(self) -> dict[str, Any] | None:
         return self._hass.data.get(DOMAIN, {}).get("settings")
@@ -310,6 +332,24 @@ class StatesView(_InfluxView):
         limit = int(settings.get(CONF_MAX_STATE_ROWS, DEFAULT_MAX_STATE_ROWS))
         queries = [q for e, m in targets for q in states_queries(e, m, days, attributes, limit, window)]
         entities = [e for e, _ in targets]
-        return await self._query(
-            settings, queries, lambda payload: parse_states(payload, entities, attributes, limit)
-        )
+        try:
+            rows, missing = await self._fetch(
+                settings,
+                queries,
+                lambda payload: (
+                    parse_states(payload, entities, attributes, limit),
+                    missing_before(payload, entities, attributes, limit),
+                ),
+            )
+            if missing:
+                # the state the range starts in, for entities that did not change in the last lookback
+                measurement = dict(targets)
+                rows = await self._fetch(
+                    settings,
+                    [before_query(e, measurement[e], days, attributes, window) for e in missing],
+                    lambda payload: merge_before(rows, payload, missing, attributes),
+                )
+            out = await self._hass.async_add_executor_job(json_bytes, rows)
+        except InfluxError as err:
+            return self._failed(err)
+        return web.Response(body=out, content_type=CONTENT_TYPE_JSON)

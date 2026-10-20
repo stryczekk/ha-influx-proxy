@@ -190,6 +190,38 @@ class States(unittest.TestCase):
         self.assertEqual(q.parse_states(payload, ["light.a"], (), limit=2)["light.a"], [[200, "off"], [300, "on"]])
         self.assertEqual(q.parse_states(payload, ["light.a"], (), limit=3)["light.a"][0], [100, "off"])
 
+    def test_row_before_is_looked_for_one_day_back_first(self):
+        before = q.states_queries("light.a", "state", 30)[0]
+        self.assertIn("time > now() - 744h AND time <= now() - 720h ORDER BY time DESC LIMIT 1", before)
+        before = q.states_queries("light.a", "state", 1, window=(1790000000000, 1790086400000))[0]
+        self.assertIn("time > '2026-09-20T14:13:20.000Z' AND time <= '2026-09-21T14:13:20.000Z' ORDER", before)
+
+    def test_unbounded_before_query(self):
+        query = q.before_query("cover.k", "state", 30, ("current_position",))
+        self.assertTrue(query.startswith('SELECT "state", "value", "current_position" FROM "state" WHERE'))
+        self.assertIn("AND time <= now() - 720h ORDER BY time DESC LIMIT 1", query)
+        self.assertNotIn("time >", query)
+        query = q.before_query("cover.k", "state", 1, (), (1790000000000, 1790086400000))
+        self.assertIn("AND time <= '2026-09-21T14:13:20.000Z' ORDER BY time DESC LIMIT 1", query)
+        self.assertNotIn("time >", query)
+
+    def test_missing_before_and_merge(self):
+        cols = ["time", "state"]
+        payload = {"results": [
+            self._result(cols, [100, "off"]), self._result(cols, [300, "on"]),  # found within the lookback
+            self._result(cols), self._result(cols, [300, "on"]),  # not found: second search
+            self._result(cols), self._result(cols, [300, "on"], [200, "off"]),  # not found, but limit hit
+            self._result(cols), self._result(cols),  # nothing at all: second search
+        ]}
+        order = ["light.a", "light.b", "light.c", "light.d"]
+        self.assertEqual(q.missing_before(payload, order, (), limit=2), ["light.b", "light.d"])
+        rows = q.parse_states(payload, order, (), limit=2)
+        second = {"results": [self._result(cols, [10, "off"]), self._result(cols)]}
+        rows = q.merge_before(rows, second, ["light.b", "light.d"])
+        self.assertEqual(rows["light.b"], [[10, "off"], [300, "on"]])
+        self.assertNotIn("light.d", rows)
+        self.assertEqual(rows["light.a"], [[100, "off"], [300, "on"]])
+
 
 if __name__ == "__main__":
     unittest.main()

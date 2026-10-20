@@ -105,20 +105,35 @@ def _rfc3339(ms: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(secs)) + f".{milli:03d}Z"
 
 
-def range_clauses(days: float, window: tuple[int, int] | None = None) -> tuple[str, str]:
+# The row before the range is looked for in this many hours first: InfluxDB 3 has no cheap "last row before",
+# it reads everything between the lower bound and the range start, so an unbounded search costs the whole history
+# (a year: ~4.5 s per entity). Entities without a row there get a second, unbounded search.
+BEFORE_LOOKBACK_HOURS = 24
+
+
+def range_clauses(
+    days: float, window: tuple[int, int] | None = None, lookback_hours: int | None = None
+) -> tuple[str, str]:
     """WHERE clauses for the rows inside the range and for the row before it.
 
     Either the last `days` up to now, or a `window` of two epoch milliseconds
-    (start exclusive, end inclusive) - a given day, for example.
+    (start exclusive, end inclusive) - a given day, for example. With
+    `lookback_hours` the row before the range is only looked for that far back.
     """
     if window is not None:
         # RFC 3339 string literals: understood by every InfluxQL (1.x, 2.x's v1 API, 3.x)
         start, end = (_rfc3339(window[0]), _rfc3339(window[1]))
-        return f"AND time > '{start}' AND time <= '{end}' ", f"AND time <= '{start}' "
+        before = f"AND time <= '{start}' "
+        if lookback_hours is not None:
+            before = f"AND time > '{_rfc3339(window[0] - lookback_hours * 3600_000)}' " + before
+        return f"AND time > '{start}' AND time <= '{end}' ", before
     # InfluxQL duration literals must be integers ("30.0d" is a syntax
     # error); counting in hours also allows ranges shorter than a day.
     hours = max(1, int(round(days * 24)))
-    return f"AND time > now() - {hours}h ", f"AND time <= now() - {hours}h "
+    before = f"AND time <= now() - {hours}h "
+    if lookback_hours is not None:
+        before = f"AND time > now() - {hours + lookback_hours}h " + before
+    return f"AND time > now() - {hours}h ", before
 
 
 def series_query(
@@ -205,26 +220,45 @@ def states_queries(
     attributes: tuple[str, ...] = (),
     limit: int = 250000,
     window: tuple[int, int] | None = None,
+    lookback_hours: int | None = BEFORE_LOOKBACK_HOURS,
 ) -> list[str]:
     """Two statements per entity: the last row BEFORE the range (the state the
     range starts in) and the rows inside it, newest first so that a hit limit
     cuts off the oldest rows, not the most recent ones.
 
     `state` holds non-numeric states ("on", "open"), `value` numeric ones -
-    Home Assistant writes one or both, so both are read.
+    Home Assistant writes one or both, so both are read. The row before is
+    looked for `lookback_hours` back only: see before_query for the rest.
     """
-    domain, object_id = entity_id.split(".", 1)
-    inside, before = range_clauses(days, window)
-    fields = ", ".join(quote_identifier(f) for f in ("state", "value", *attributes))
-    source = (
-        f"SELECT {fields} FROM {quote_identifier(measurement)} "
-        f"WHERE {quote_identifier('domain')} = {quote_string(domain)} "
-        f"AND {quote_identifier('entity_id')} = {quote_string(object_id)} "
-    )
+    inside, before = range_clauses(days, window, lookback_hours)
+    source = _states_source(entity_id, measurement, attributes)
     return [
         source + before + "ORDER BY time DESC LIMIT 1",
         source + inside + f"ORDER BY time DESC LIMIT {int(limit)}",
     ]
+
+
+def before_query(
+    entity_id: str,
+    measurement: str,
+    days: float,
+    attributes: tuple[str, ...] = (),
+    window: tuple[int, int] | None = None,
+) -> str:
+    """The last row before the range, searched without a lower bound - for
+    entities whose row was not within the first lookback."""
+    _, before = range_clauses(days, window)
+    return _states_source(entity_id, measurement, attributes) + before + "ORDER BY time DESC LIMIT 1"
+
+
+def _states_source(entity_id: str, measurement: str, attributes: tuple[str, ...]) -> str:
+    domain, object_id = entity_id.split(".", 1)
+    fields = ", ".join(quote_identifier(f) for f in ("state", "value", *attributes))
+    return (
+        f"SELECT {fields} FROM {quote_identifier(measurement)} "
+        f"WHERE {quote_identifier('domain')} = {quote_string(domain)} "
+        f"AND {quote_identifier('entity_id')} = {quote_string(object_id)} "
+    )
 
 
 def _state_rows(item: dict, attributes: tuple[str, ...]) -> list[list]:
@@ -269,3 +303,35 @@ def parse_states(
         if rows:
             out[entity_id] = rows
     return out
+
+
+def missing_before(
+    payload: dict, order: list[str], attributes: tuple[str, ...] = (), limit: int = 250000
+) -> list[str]:
+    """Entities of a states_queries payload that need the unbounded search:
+    no row before the range within the lookback, and a range that did not hit
+    the row limit (then the row before is dropped anyway)."""
+    results = payload.get("results") or []
+    out = []
+    for index, entity_id in enumerate(order):
+        pair = results[2 * index:2 * index + 2]
+        if len(pair) < 2:
+            break
+        if not _state_rows(pair[0], attributes) and len(_state_rows(pair[1], attributes)) < limit:
+            out.append(entity_id)
+    return out
+
+
+def merge_before(
+    rows: dict[str, list[list]], payload: dict, order: list[str], attributes: tuple[str, ...] = ()
+) -> dict[str, list[list]]:
+    """Put the rows of the before_query statements (one per entity in `order`)
+    in front of each entity's rows."""
+    results = payload.get("results") or []
+    for index, entity_id in enumerate(order):
+        if index >= len(results):
+            break
+        before = _state_rows(results[index], attributes)[:1]
+        if before:
+            rows[entity_id] = before + rows.get(entity_id, [])
+    return rows

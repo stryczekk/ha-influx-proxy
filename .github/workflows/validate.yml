@@ -29,3 +29,46 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m unittest discover -s tests -v
+
+  compat:
+    # the integration's own queries against a real database, as Home Assistant's `influxdb` integration writes it
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        influxdb: ["1.8", "2.7", "3-core"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start InfluxDB ${{ matrix.influxdb }}
+        run: |
+          case "${{ matrix.influxdb }}" in
+            1.8)
+              docker run -d --name db -p 8086:8086 influxdb:1.8
+              echo "INFLUX_URL=http://localhost:8086" >> "$GITHUB_ENV"
+              echo "INFLUX_CREATE_DB=1" >> "$GITHUB_ENV" ;;
+            2.7)
+              token="ci-$(openssl rand -hex 16)"
+              echo "::add-mask::$token"
+              docker run -d --name db -p 8086:8086 \
+                -e DOCKER_INFLUXDB_INIT_MODE=setup -e DOCKER_INFLUXDB_INIT_USERNAME=ci \
+                -e DOCKER_INFLUXDB_INIT_PASSWORD="$(openssl rand -hex 16)" -e DOCKER_INFLUXDB_INIT_ORG=ci \
+                -e DOCKER_INFLUXDB_INIT_BUCKET=homeassistant -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN="$token" influxdb:2.7
+              echo "INFLUX_URL=http://localhost:8086" >> "$GITHUB_ENV"
+              echo "INFLUX_TOKEN=$token" >> "$GITHUB_ENV" ;;
+            3-core)
+              docker run -d --name db -p 8181:8181 influxdb:3-core \
+                influxdb3 serve --node-id ci --object-store memory
+              for i in $(seq 30); do
+                token="$(docker exec db influxdb3 create token --admin 2>/dev/null | grep -o 'apiv3_[A-Za-z0-9_-]*' | head -1)"
+                [ -n "$token" ] && break; sleep 2
+              done
+              test -n "$token"
+              echo "::add-mask::$token"
+              echo "INFLUX_URL=http://localhost:8181" >> "$GITHUB_ENV"
+              echo "INFLUX_TOKEN=$token" >> "$GITHUB_ENV" ;;
+          esac
+      - name: Compatibility test
+        run: python3 tests/compat/run.py
+      - name: Database log
+        if: failure()
+        run: docker logs db 2>&1 | tail -50

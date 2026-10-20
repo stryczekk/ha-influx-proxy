@@ -159,7 +159,10 @@ Response — rows `[time_ms, state, ...attributes]`, oldest first:
 
 - The **first row is the last change before the range** (when there is
   one), so the state the range starts in is known — also for a `start`/`end`
-  range: replaying any past day starts from the right state.
+  range: replaying any past day starts from the right state. It is looked
+  for in the day before the range first, and further back only for entities
+  that did not change in that day: on InfluxDB 3 a search through the whole
+  history takes a minute on a year of data, the one-day search 0.1 s.
 - `state` is the string state (`"on"`, `"open"`); for entities with a
   numeric state the number is returned instead.
 - Attributes come from the fields the `influxdb` integration writes for
@@ -207,13 +210,60 @@ const replay = await this.hass.callApi(
 console.log(on / 3600e3, "h");
 ```
 
+## InfluxDB 3
+
+InfluxDB 3 answers InfluxQL on the same `/query` endpoint, so the proxy needs
+nothing special — point it at `http://<host>:8181`, the database name and
+an **admin or read token** (authentication *Token*).
+
+Home Assistant's `influxdb` integration writes to InfluxDB 3 either way
+(tested with Home Assistant 2026.10.2 and InfluxDB 3 Core 3.12.1, read back
+through the proxy):
+
+| `influxdb` setting | Value |
+|---|---|
+| `api_version: 2` | `token:` the token, `bucket:` the database name, `organization:` any non-empty value |
+| `api_version: 1` | `database:` the database name, `username:` anything, `password:` the token |
+
+The database is created on the first write.
+
+> **Changing the YAML later does nothing.** Since Home Assistant 2026.10 the
+> `influxdb:` section is imported into an integration entry on the first
+> start; afterwards the entry wins. Change the entry (or delete it and
+> restart to import again).
+
+### InfluxDB 3 Core and long ranges
+
+**InfluxDB 3 Core is a poor fit for long-term Home Assistant history with
+its defaults.** It persists a Parquet file for every table every 10 minutes
+and never merges them (compaction is an InfluxDB 3 Enterprise feature). A
+query may touch at most 432 files by default — **about 3 days of one
+measurement**. Anything longer fails:
+
+```
+Query would scan 432 Parquet files, exceeding the file limit.
+```
+
+Raising `--query-file-limit` makes long ranges work, but slowly. Measured
+on a year of one sensor every 10 minutes (57 600 files, 2 cores):
+
+| Query | Core, `--query-file-limit 100000` |
+|---|---|
+| `/series`, 30 days | 13.6 s |
+| `/series`, 90 days | 10.2 s |
+| `/series`, 365 days | 39.9 s |
+| `/states`, 30 days | 3.4 s |
+
+For long history use **InfluxDB 3 Enterprise** (free for home use, merges
+the files) or stay on 1.8 / 2.7.
+
 ## Compatibility
 
 | InfluxDB | Status | Auth used in the test |
 |---|---|---|
 | 1.8.10 | ✅ tested | none |
 | 2.7.12 | ✅ tested — v1 compatibility API; each bucket is automatically usable as a database of the same name | token |
-| 3 Core 3.11.5, 3.12.0 | ✅ tested — InfluxQL over `/query` | none (`--without-auth`) |
+| 3 Core 3.11.5, 3.12.0, 3.12.1 | ✅ tested — InfluxQL over `/query`; see [InfluxDB 3](#influxdb-3) for long ranges | token (3.12.1), none (`--without-auth`) |
 
 The test (`tests/compat/run.py`) writes points shaped exactly like Home
 Assistant's `influxdb` integration writes them and reads them back with the
@@ -223,8 +273,8 @@ without a unit, injection attempt harmless, config-flow connection test
 query working; for `/states`: the row before the range, oldest-first order,
 attributes, an unknown attribute as `null`, numeric states and the row
 limit keeping the newest rows; a fixed `start`/`end` range for both
-endpoints (14 checks, 1.2.0 on 1.8.10 and the current 2.7 and 3 Core
-images of 2026-10-09).
+endpoints; the row before the range found beyond the first lookback
+(15 checks). It runs in CI on every push against 1.8, 2.7 and 3 Core.
 
 ## Tests
 
@@ -232,7 +282,7 @@ images of 2026-10-09).
 |---|---|---|
 | `tests/test_query.py` | query building, InfluxQL escaping, measurement naming, result parsing (both endpoints) | nothing (`python -m unittest discover -s tests`) |
 | `tests/compat/run.py` | the integration's queries against a **real InfluxDB** 1.8 / 2.7 / 3 Core | an InfluxDB |
-| `tests/e2e/flow.py` | **config flow as the UI drives it** (fields, credentials in URL, `invalid_url`, `invalid_auth`, `cannot_connect`, single instance), options flow and reload, endpoint validation, limits, duplicates, 401 without session, 503 after removal | a **test** Home Assistant + InfluxDB, `E2E_TEST_INSTANCE=1` (it deletes entries) |
+| `tests/e2e/flow.py` | **config flow as the UI drives it** (fields, credentials in URL, `invalid_url`, `invalid_auth`, `cannot_connect`, single instance), options flow and reload, `/states` (row before the range, attributes, the second search), endpoint validation, limits, duplicates, 401 without session, 503 after removal | a **test** Home Assistant + InfluxDB, `E2E_TEST_INSTANCE=1` (it deletes entries) |
 | `tests/e2e/yaml_import.py` | legacy YAML import, no duplicate on restart, repair issue shown and withdrawn, cleanup | a **test** Home Assistant, `E2E_TEST_INSTANCE=1` (it edits `configuration.yaml` and restarts) |
 
 ## Migrating from YAML configuration

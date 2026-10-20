@@ -159,10 +159,10 @@ def main() -> int:
     _, opt = call("POST", "/config/config_entries/options/flow", {"handler": entry_id})
     ofields = [f["name"] for f in opt.get("data_schema", [])]
     check("options form fields", ofields == ["measurement_mode", "default_measurement",
-          "override_measurement", "max_entities", "max_days"], str(ofields))
+          "override_measurement", "max_entities", "max_days", "max_state_rows"], str(ofields))
     _, opt = call("POST", f"/config/config_entries/options/flow/{opt['flow_id']}",
                   {"measurement_mode": "unit_of_measurement", "default_measurement": "state",
-                   "override_measurement": "", "max_entities": 3, "max_days": 30})
+                   "override_measurement": "", "max_entities": 3, "max_days": 30, "max_state_rows": 250000})
     check("options saved", opt.get("type") == "create_entry", str(opt.get("type")))
 
     # the options listener reloads the entry in the background - wait for it
@@ -174,11 +174,20 @@ def main() -> int:
     check("default measurement 'state' applied after reload",
           status == 200 and bool(data.get("sensor.compat_no_unit")), f"HTTP {status} {str(data)[:80]}")
 
+    # -- /states with the default measurement 'state' (written by tests/compat/run.py)
+    status, data = call("GET", "/influx_proxy/states?entities=cover.compat_blind,light.compat_quiet&days=1"
+                        "&attributes=current_position")
+    check("states: row before + change inside, with attribute",
+          status == 200 and [r[1:] for r in data.get("cover.compat_blind", [])] == [["closed", 0], ["open", 100]],
+          f"HTTP {status} {str(data)[:120]}")
+    check("states: row before found beyond the first lookback (second search)",
+          status == 200 and [r[1] for r in data.get("light.compat_quiet", [])] == ["on"], f"HTTP {status}")
+
     # -- override measurement: finds the °C series, number.* excluded
     _, opt = call("POST", "/config/config_entries/options/flow", {"handler": entry_id})
     call("POST", f"/config/config_entries/options/flow/{opt['flow_id']}",
          {"measurement_mode": "unit_of_measurement", "default_measurement": "state",
-          "override_measurement": "°C", "max_entities": 3, "max_days": 30})
+          "override_measurement": "°C", "max_entities": 3, "max_days": 30, "max_state_rows": 250000})
     for _ in range(30):
         status, data = series("entities=sensor.compat_room&days=1")
         if status == 200 and data.get("sensor.compat_room"):
