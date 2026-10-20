@@ -18,6 +18,7 @@ accept InfluxQL from the client.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import logging
 import time
 from typing import Any
@@ -28,13 +29,14 @@ import voluptuous as vol
 from homeassistant.auth.permissions.const import POLICY_READ
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
-from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME
+from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, CONTENT_TYPE_JSON
 from homeassistant.core import DOMAIN as HA_DOMAIN, HomeAssistant
 from homeassistant.helpers import config_validation as cv, issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.json import json_bytes
 from homeassistant.helpers.typing import ConfigType
 
-from .client import InfluxError, run_query
+from .client import InfluxError, decode, run_query
 from .const import (
     API_PATH,
     API_STATES_PATH,
@@ -140,6 +142,11 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+def _answer(body: bytes, build: Callable[[dict[str, Any]], Any]) -> bytes:
+    """Decode an InfluxDB body, shape it and serialize the answer (executor job)."""
+    return json_bytes(build(decode(body)))
+
+
 class _InfluxView(HomeAssistantView):
     """Shared request validation and query execution."""
 
@@ -218,19 +225,29 @@ class _InfluxView(HomeAssistantView):
             out.append((entity_id, measurement))
         return out
 
-    async def _query(self, settings: dict[str, Any], queries: list[str]) -> dict | web.Response:
+    async def _query(
+        self, settings: dict[str, Any], queries: list[str], build: Callable[[dict[str, Any]], Any]
+    ) -> web.Response:
+        """Run the queries and answer with `build(payload)` as JSON.
+
+        Decoding the body, parsing it into rows and serializing the answer can
+        take a while for long ranges, so all of it runs in an executor job,
+        never on the event loop.
+        """
         try:
             async with self._slots:
-                return await run_query(
+                body = await run_query(
                     async_get_clientsession(self._hass, settings.get("verify_ssl", True)),
                     settings,
                     ";".join(queries),
                 )
+            out = await self._hass.async_add_executor_job(_answer, body, build)
         except InfluxError as err:
             # detail (host, port, InfluxDB error text) only in the log -
             # any logged-in user, admin or not, can call these endpoints
             _LOGGER.warning("InfluxDB query failed: %s", err)
             return self.json_message(f"InfluxDB query failed ({err.kind})", 502)
+        return web.Response(body=out, content_type=CONTENT_TYPE_JSON)
 
     def _settings(self) -> dict[str, Any] | None:
         return self._hass.data.get(DOMAIN, {}).get("settings")
@@ -256,10 +273,12 @@ class SeriesView(_InfluxView):
         targets = self._measurements(settings, entity_ids)
         if not targets:
             return self.json({})
-        payload = await self._query(settings, [series_query(e, m, days, window) for e, m in targets])
-        if isinstance(payload, web.Response):
-            return payload
-        return self.json(parse_results(payload, [e for e, _ in targets]))
+        entities = [e for e, _ in targets]
+        return await self._query(
+            settings,
+            [series_query(e, m, days, window) for e, m in targets],
+            lambda payload: parse_results(payload, entities),
+        )
 
 
 class StatesView(_InfluxView):
@@ -290,7 +309,7 @@ class StatesView(_InfluxView):
             return self.json({})
         limit = int(settings.get(CONF_MAX_STATE_ROWS, DEFAULT_MAX_STATE_ROWS))
         queries = [q for e, m in targets for q in states_queries(e, m, days, attributes, limit, window)]
-        payload = await self._query(settings, queries)
-        if isinstance(payload, web.Response):
-            return payload
-        return self.json(parse_states(payload, [e for e, _ in targets], attributes, limit))
+        entities = [e for e, _ in targets]
+        return await self._query(
+            settings, queries, lambda payload: parse_states(payload, entities, attributes, limit)
+        )

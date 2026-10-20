@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import aiohttp
+import orjson  # ships with Home Assistant; several times faster than json, so the GIL is held for less time
 
 from .const import AUTH_BASIC, AUTH_TOKEN, CONF_AUTH, CONF_DATABASE, CONF_TOKEN
 from .query import first_error
@@ -40,8 +41,12 @@ def _auth(settings: dict[str, Any]) -> tuple[aiohttp.BasicAuth | None, dict[str,
 
 async def run_query(
     session: aiohttp.ClientSession, settings: dict[str, Any], query: str
-) -> dict[str, Any]:
-    """Run one or more `;`-separated InfluxQL statements, return the JSON."""
+) -> bytes:
+    """Run one or more `;`-separated InfluxQL statements, return the raw body.
+
+    The body can be megabytes: decode it with `decode()` in an executor job,
+    not on the event loop.
+    """
     auth, headers = _auth(settings)
     params = {"db": settings[CONF_DATABASE], "epoch": "ms", "q": query}
     try:
@@ -58,16 +63,22 @@ async def run_query(
             if response.status != 200:
                 body = (await response.text())[:200]
                 raise InfluxError("query_failed", f"HTTP {response.status}: {body}")
-            try:
-                payload = await response.json(content_type=None)
-            except ValueError as err:  # a login page or a web UI instead of InfluxDB
-                raise InfluxError("not_influxdb", str(err)) from err
+            return await response.read()
     except aiohttp.ClientError as err:
         raise InfluxError("cannot_connect", str(err)) from err
     except TimeoutError as err:
         raise InfluxError("cannot_connect", "timeout") from err
     except ValueError as err:  # e.g. aiohttp refusing credentials both in URL and header
         raise InfluxError("invalid_url", str(err)) from err
+
+
+def decode(body: bytes) -> dict[str, Any]:
+    """Parse and check a `/query` response body. Blocking for large bodies:
+    call it from an executor job."""
+    try:
+        payload = orjson.loads(body)
+    except ValueError as err:  # orjson.JSONDecodeError is a ValueError  # a login page or a web UI instead of InfluxDB
+        raise InfluxError("not_influxdb", str(err)) from err
     if not isinstance(payload, dict):
         raise InfluxError("not_influxdb", "response is not a JSON object")
     error = first_error(payload)
@@ -79,4 +90,4 @@ async def run_query(
 
 async def test_connection(session: aiohttp.ClientSession, settings: dict[str, Any]) -> None:
     """Cheap query that proves URL, credentials and database all work."""
-    await run_query(session, settings, "SHOW MEASUREMENTS LIMIT 1")
+    decode(await run_query(session, settings, "SHOW MEASUREMENTS LIMIT 1"))  # a few bytes
