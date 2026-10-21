@@ -2,8 +2,9 @@
 
 [![hacs][hacs-badge]][hacs] [![Validate][validate-badge]][validate] [![Buy Me a Coffee][bmc-badge]][bmc]
 
-Long-term history from **InfluxDB** for your Lovelace cards — served **by
-Home Assistant itself**, so it works everywhere your dashboard works.
+Long-term history from **InfluxDB** (1.x, 2.x, 3.x) or **VictoriaMetrics**
+for your Lovelace cards — served **by Home Assistant itself**, so it works
+everywhere your dashboard works.
 
 ```
 GET /api/influx_proxy/series?entities=sensor.living_room_temperature,sensor.outside_temperature&days=30
@@ -47,17 +48,23 @@ InfluxDB on the server side.
 
 ### HACS (recommended)
 
-[![Open your Home Assistant instance and open this repository inside HACS.][hacs-open-badge]][hacs-open]
+InfluxDB Proxy is in the HACS default store:
 
-1. Click the button above — it adds this repository to HACS in your Home
-   Assistant. Or manually: HACS → ⋮ → **Custom repositories** → add
-   `https://github.com/stryczekk/ha-influx-proxy`, category **Integration**
-2. Install **InfluxDB Proxy**, restart Home Assistant
+1. Open **HACS**, search for **InfluxDB Proxy** and download it — or click
+   the button to open it in HACS directly:
+
+   [![Open your Home Assistant instance and open this repository inside HACS.][hacs-open-badge]][hacs-open]
+
+2. Restart Home Assistant
 3. Add the integration:
 
    [![Open your Home Assistant instance and start setting up InfluxDB Proxy.][config-flow-badge]][config-flow]
 
    or **Settings → Devices & services → Add integration → InfluxDB Proxy**
+
+Not found? Your HACS may not have refreshed its list yet: add it as a custom
+repository instead — HACS → ⋮ → **Custom repositories** →
+`https://github.com/stryczekk/ha-influx-proxy`, category **Integration**.
 
 ### Manual
 
@@ -257,12 +264,162 @@ on a year of one sensor every 10 minutes (57 600 files, 2 cores):
 For long history use **InfluxDB 3 Enterprise** (free for home use, merges
 the files) or stay on 1.8 / 2.7.
 
+## VictoriaMetrics
+
+[VictoriaMetrics](https://victoriametrics.com/) accepts what Home
+Assistant's `influxdb` integration writes — point the integration at
+VictoriaMetrics (`host`, `port: 8428`, `database: homeassistant`) and nothing
+else changes. The proxy reads it back: choose **VictoriaMetrics** as the
+database in the first step, the URL (`http://<host>:8428`) and, as the
+database, the `database` set in the `influxdb` integration (it becomes the
+`db` label). Measurement naming options work the same way.
+
+What to expect — VictoriaMetrics **stores numbers only**:
+
+- `/series` works as with InfluxDB (temperatures, power, any numeric sensor).
+- `/states` works for states Home Assistant also writes as a number: on/off,
+  open/closed, home/not_home, locked/unlocked, above/below horizon. The
+  proxy turns the stored 1/0 back into the text, by domain (`cover` →
+  `open`/`closed`, `lock` → `locked`/`unlocked`, `person` and
+  `device_tracker` → `home`/`not_home`, otherwise `on`/`off`). Numeric
+  attributes (`current_position`, `brightness`) come along.
+- **Text states are not stored** (`playing`, `heat`, a washing machine
+  program): entities with only such states are left out of `/states` —
+  unless you turn on **Store text states** (below).
+
+### Store text states (VictoriaMetrics)
+
+**Configure → Store text states** (off by default, needs write access).
+The proxy then writes every non-numeric state itself, as a number from a
+dictionary that is kept in VictoriaMetrics as well:
+
+```
+ha_state_code{domain="media_player",entity_id="tv",db="homeassistant"} 2
+ha_state_label{label="playing",code="2",db="homeassistant"} 2
+```
+
+`/states` reads both back and returns the exact text (`playing`,
+`płukanie "extra"`), with the attributes the `influxdb` integration wrote at
+the same moment — the codes carry the same millisecond. The `influxdb`
+integration keeps writing everything else; nothing changes there.
+
+- **Only what the `influxdb` integration writes:** its `include` /
+  `exclude` from `configuration.yaml` applies here too, so an entity you
+  excluded (say `person.*`, for privacy) is not written. If that
+  configuration cannot be read, nothing is written.
+- **Codes never change:** the dictionary is read from VictoriaMetrics in
+  the background after start (nothing is written until it is, Home
+  Assistant does not wait for it), a copy is kept in `.storage`, and new
+  states get the next free number. It is written again once a day, so no
+  label ages out of the retention period.
+- **One writer per `db`.** Two Home Assistant instances (a test one, say)
+  writing text states to the same `db` could give one number to two
+  states; the proxy then logs an error and leaves that number's rows out.
+- **Free text is skipped:** states longer than 100 characters, dates and
+  times (`sensor.sun_next_rising`), entities with more than 64 different
+  states (a media title, a status message), and anything once the
+  dictionary has 5000 labels. What was found to be free text is
+  remembered across restarts.
+- Unknown and unavailable are not written, as with the `influxdb`
+  integration. While VictoriaMetrics is unreachable, up to 50 000 changes
+  wait in memory (one warning, one "writing again" when it is back); what
+  is waiting is written when Home Assistant stops.
+
+Tested with VictoriaMetrics v1.154.1 and Home Assistant 2026.10.2 (the
+`influxdb` integration writing, the proxy reading through the Home
+Assistant API).
+
+## Migrating from InfluxDB 1.x
+
+For anyone leaving InfluxDB 1.x (for example after the InfluxDB add-on left
+the Home Assistant add-on store). Everything below was run on a real home:
+9 months, 845 numeric series, 5.7 million text states.
+
+**Not in a hurry?** InfluxDB 1.8 or 2.7 in its own container keeps working
+with this proxy; nothing forces a move.
+
+### To VictoriaMetrics (recommended)
+
+1. **Start VictoriaMetrics with a long retention.** The default keeps one
+   month and drops anything older — including the history you are about to
+   copy: `-retentionPeriod=100y` (or what you want to keep).
+2. **Point Home Assistant's `influxdb` integration at VictoriaMetrics**
+   (`host`, `port: 8428`, the same `database`). Note the time: new data now
+   goes there. In Home Assistant 2026.10+ change the integration entry, not
+   the YAML (the YAML is only imported once).
+3. **Copy the history with VictoriaMetrics' own [vmctl](https://docs.victoriametrics.com/victoriametrics/vmctl/)**,
+   up to the time from step 2, so nothing is copied twice:
+
+   ```bash
+   docker run --rm --network host victoriametrics/vmctl influx \
+     --influx-addr http://influxdb:8086 --influx-database homeassistant \
+     --influx-filter-time-end 2026-10-21T10:00:00Z \
+     --vm-addr http://victoriametrics:8428 --disable-progress-bar -s
+   ```
+
+   Credentials: `INFLUX_USERNAME` / `INFLUX_PASSWORD` in the environment.
+   The defaults name the series exactly as the `influxdb` integration does
+   (`{measurement}_{field}`, labels `domain`, `entity_id`, `db`) — keep them.
+   Our 27 million samples took 4 minutes.
+4. **Text states (optional, for `/states`).** vmctl skips string fields, so
+   `playing`, `heat` or a washing machine program stay behind. This copies
+   them as dictionary codes, the way **Store text states** writes them, on
+   the same milliseconds as the points vmctl copied:
+
+   ```bash
+   python tools/migrate_text_states.py --influx http://influxdb:8086 --vm http://victoriametrics:8428 --dry-run
+   python tools/migrate_text_states.py --influx http://influxdb:8086 --vm http://victoriametrics:8428
+   ```
+
+   Free text is skipped and listed (timestamps such as `sensor.sun_next_rising`,
+   uptimes, notifications). Ours: 4.66 million text states, a dictionary of
+   153 labels, 30 entities skipped, 30 seconds. Run it **before** turning on
+   Store text states, and only once (a second run within a few seconds could
+   see an incomplete dictionary).
+5. **Check it** — every series, plus what the proxy answers from both
+   databases for a random sample of entities:
+
+   ```bash
+   python tools/verify_migration.py --influx http://influxdb:8086 --vm http://victoriametrics:8428
+   ```
+
+   `OK - the cards will see the same history`, or a list of differences.
+   Known, harmless: several InfluxDB rows in the same millisecond become one
+   (VictoriaMetrics keeps milliseconds), numbers are kept to about 12
+   significant digits.
+6. **Switch the proxy:** remove the integration and add it again with
+   **VictoriaMetrics** as the database (copy your measurement options), then
+   turn on **Store text states** if you want text states from now on.
+
+The tools need Python 3 only and run anywhere that reaches both databases;
+they read the source and never change it.
+
+### To InfluxDB 3
+
+Possible, but read [InfluxDB 3 Core and long ranges](#influxdb-3-core-and-long-ranges)
+first: migrated history ends up as one small file per table per 10 minutes.
+14 days of our data imported fine (5.6 million lines, no rejected writes),
+but InfluxDB 3 Core then could not even count them within 10 minutes on a
+4 GB test machine. With InfluxDB 3 Enterprise (compaction) or a much
+smaller history it is a plain export and import:
+
+```bash
+influx_inspect export -datadir /var/lib/influxdb/data -waldir /var/lib/influxdb/wal \
+  -database homeassistant -retention autogen -lponly -out homeassistant.lp
+```
+
+Write the file to InfluxDB 3's `/write?db=homeassistant` endpoint in chunks
+(a few thousand lines per request), then check with
+`tools/verify_migration.py --influx … --target-influx http://influxdb3:8181 --no-counts`
+(`TARGET_INFLUX_TOKEN` in the environment).
+
 ## Compatibility
 
 | InfluxDB | Status | Auth used in the test |
 |---|---|---|
 | 1.8.10 | ✅ tested | none |
 | 2.7.12 | ✅ tested — v1 compatibility API; each bucket is automatically usable as a database of the same name | token |
+| VictoriaMetrics v1.154.1 | ✅ tested — reads what the `influxdb` integration writes; numbers only, see [VictoriaMetrics](#victoriametrics) | none |
 | 3 Core 3.11.5, 3.12.0, 3.12.1 | ✅ tested — InfluxQL over `/query`; see [InfluxDB 3](#influxdb-3) for long ranges | token (3.12.1), none (`--without-auth`) |
 
 The test (`tests/compat/run.py`) writes points shaped exactly like Home
@@ -274,7 +431,8 @@ query working; for `/states`: the row before the range, oldest-first order,
 attributes, an unknown attribute as `null`, numeric states and the row
 limit keeping the newest rows; a fixed `start`/`end` range for both
 endpoints; the row before the range found beyond the first lookback
-(15 checks). It runs in CI on every push against 1.8, 2.7 and 3 Core.
+(15 checks). It runs in CI on every push against 1.8, 2.7 and 3 Core, and
+`run_vm.py` against VictoriaMetrics.
 
 ## Tests
 
@@ -282,7 +440,9 @@ endpoints; the row before the range found beyond the first lookback
 |---|---|---|
 | `tests/test_query.py` | query building, InfluxQL escaping, measurement naming, result parsing (both endpoints) | nothing (`python -m unittest discover -s tests`) |
 | `tests/compat/run.py` | the integration's queries against a **real InfluxDB** 1.8 / 2.7 / 3 Core | an InfluxDB |
+| `tests/compat/run_vm.py` | the same against a **real VictoriaMetrics**: series, `db` label, injection attempt, `/states` text from 1/0, attributes, the row before the range, text states from the dictionary (quotes, Polish letters) | a VictoriaMetrics |
 | `tests/e2e/flow.py` | **config flow as the UI drives it** (fields, credentials in URL, `invalid_url`, `invalid_auth`, `cannot_connect`, single instance), options flow and reload, `/states` (row before the range, attributes, the second search), endpoint validation, limits, duplicates, 401 without session, 503 after removal | a **test** Home Assistant + InfluxDB, `E2E_TEST_INSTANCE=1` (it deletes entries) |
+| `tests/e2e/flow_vm.py` | the config flow with the VictoriaMetrics backend, both endpoints through the Home Assistant API, **Store text states** (states set through the API come back as text, free text skipped) | a **test** Home Assistant + VictoriaMetrics with data from `run_vm.py`, `E2E_TEST_INSTANCE=1` |
 | `tests/e2e/yaml_import.py` | legacy YAML import, no duplicate on restart, repair issue shown and withdrawn, cleanup | a **test** Home Assistant, `E2E_TEST_INSTANCE=1` (it edits `configuration.yaml` and restarts) |
 
 ## Migrating from YAML configuration
@@ -302,7 +462,7 @@ tinkering, you can [buy me a coffee][bmc] ☕ — thank you!
 MIT
 
 [hacs]: https://hacs.xyz
-[hacs-badge]: https://img.shields.io/badge/HACS-Custom-41BDF5.svg
+[hacs-badge]: https://img.shields.io/badge/HACS-Default-41BDF5.svg
 [validate]: https://github.com/stryczekk/ha-influx-proxy/actions/workflows/validate.yml
 [validate-badge]: https://github.com/stryczekk/ha-influx-proxy/actions/workflows/validate.yml/badge.svg
 [bmc]: https://buymeacoffee.com/stryczekk

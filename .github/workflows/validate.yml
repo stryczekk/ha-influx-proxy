@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        influxdb: ["1.8", "2.7", "3-core"]
+        influxdb: ["1.8", "2.7", "3-core", "victoriametrics"]
     steps:
       - uses: actions/checkout@v4
       - name: Start InfluxDB ${{ matrix.influxdb }}
@@ -66,9 +66,13 @@ jobs:
               echo "::add-mask::$token"
               echo "INFLUX_URL=http://localhost:8181" >> "$GITHUB_ENV"
               echo "INFLUX_TOKEN=$token" >> "$GITHUB_ENV" ;;
+            victoriametrics)
+              docker run -d --name db -p 8428:8428 victoriametrics/victoria-metrics:latest
+              echo "VM_URL=http://localhost:8428" >> "$GITHUB_ENV" ;;
           esac
       - name: Compatibility test
-        run: python3 tests/compat/run.py
+        run: |
+          if [ -n "${VM_URL:-}" ]; then python3 tests/compat/run_vm.py; else python3 tests/compat/run.py; fi
       - name: Database log
         if: failure()
         run: docker logs db 2>&1 | tail -50

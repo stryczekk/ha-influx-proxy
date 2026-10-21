@@ -29,7 +29,10 @@ from .const import (
     AUTH_BASIC,
     AUTH_NONE,
     AUTH_TOKEN,
+    BACKEND_INFLUXDB,
+    BACKEND_VICTORIAMETRICS,
     CONF_AUTH,
+    CONF_BACKEND,
     CONF_DATABASE,
     CONF_DEFAULT_MEASUREMENT,
     CONF_MAX_DAYS,
@@ -38,6 +41,7 @@ from .const import (
     CONF_MEASUREMENT_MODE,
     CONF_OVERRIDE_MEASUREMENT,
     CONF_TOKEN,
+    CONF_WRITE_STATES,
     DEFAULT_DATABASE,
     DEFAULT_MAX_DAYS,
     DEFAULT_MAX_ENTITIES,
@@ -57,6 +61,13 @@ CONNECTION_ERRORS = {"cannot_connect", "database_not_found", "not_influxdb", "in
 def _connection_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
+            vol.Required(CONF_BACKEND, default=defaults.get(CONF_BACKEND, BACKEND_INFLUXDB)): SelectSelector(
+                SelectSelectorConfig(
+                    options=[BACKEND_INFLUXDB, BACKEND_VICTORIAMETRICS],
+                    translation_key=CONF_BACKEND,
+                    mode=SelectSelectorMode.LIST,
+                )
+            ),
             vol.Required(CONF_URL, default=defaults.get(CONF_URL, "http://localhost:8086")): TextSelector(
                 TextSelectorConfig(type=TextSelectorType.URL)
             ),
@@ -227,6 +238,7 @@ class InfluxProxyOptionsFlow(OptionsFlow):
                     ): NumberSelector(
                         NumberSelectorConfig(min=1000, max=5000000, step=1000, mode=NumberSelectorMode.BOX)
                     ),
+                    vol.Required(CONF_WRITE_STATES, default=o.get(CONF_WRITE_STATES, False)): bool,
                 }
             ),
         )

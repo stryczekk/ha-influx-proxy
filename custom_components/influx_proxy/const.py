@@ -11,6 +11,11 @@ CONF_OVERRIDE_MEASUREMENT = "override_measurement"
 CONF_MAX_ENTITIES = "max_entities"
 CONF_MAX_DAYS = "max_days"
 CONF_MAX_STATE_ROWS = "max_state_rows"
+CONF_WRITE_STATES = "write_states"
+
+CONF_BACKEND = "backend"
+BACKEND_INFLUXDB = "influxdb"
+BACKEND_VICTORIAMETRICS = "victoriametrics"
 
 AUTH_NONE = "none"
 AUTH_BASIC = "basic"

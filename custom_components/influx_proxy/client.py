@@ -13,7 +13,15 @@ from typing import Any
 import aiohttp
 import orjson  # ships with Home Assistant; several times faster than json, so the GIL is held for less time
 
-from .const import AUTH_BASIC, AUTH_TOKEN, CONF_AUTH, CONF_DATABASE, CONF_TOKEN
+from .const import (
+    AUTH_BASIC,
+    AUTH_TOKEN,
+    BACKEND_VICTORIAMETRICS,
+    CONF_AUTH,
+    CONF_BACKEND,
+    CONF_DATABASE,
+    CONF_TOKEN,
+)
 from .query import first_error
 
 TIMEOUT = aiohttp.ClientTimeout(total=60)
@@ -90,4 +98,79 @@ def decode(body: bytes) -> dict[str, Any]:
 
 async def test_connection(session: aiohttp.ClientSession, settings: dict[str, Any]) -> None:
     """Cheap query that proves URL, credentials and database all work."""
+    if settings.get(CONF_BACKEND) == BACKEND_VICTORIAMETRICS:
+        payload = vm_decode(await vm_get(session, settings, "/api/v1/label/db/values", []))
+        database = settings.get(CONF_DATABASE) or ""
+        if database and database not in (payload.get("data") or []):
+            raise InfluxError("database_not_found", database)
+        return
     decode(await run_query(session, settings, "SHOW MEASUREMENTS LIMIT 1"))  # a few bytes
+
+
+async def vm_get(
+    session: aiohttp.ClientSession, settings: dict[str, Any], path: str, params: list[tuple[str, str]] | dict[str, str]
+) -> bytes:
+    """GET a VictoriaMetrics endpoint, return the raw body (JSON or, for
+    /api/v1/export, one JSON object per line)."""
+    auth, headers = _auth(settings)
+    if "Authorization" in headers:  # vmauth and VictoriaMetrics' own -httpAuth take a bearer token
+        headers = {"Authorization": "Bearer " + headers["Authorization"].split(" ", 1)[1]}
+    try:
+        async with session.get(
+            settings["url"].rstrip("/") + path,
+            params=params,
+            auth=auth,
+            headers=headers,
+            timeout=TIMEOUT,
+            ssl=settings.get("verify_ssl", True),
+        ) as response:
+            if response.status in (401, 403):
+                raise InfluxError("invalid_auth")
+            if response.status != 200:
+                body = (await response.text())[:200]
+                raise InfluxError("query_failed", f"HTTP {response.status}: {body}")
+            return await response.read()
+    except aiohttp.ClientError as err:
+        raise InfluxError("cannot_connect", str(err)) from err
+    except TimeoutError as err:
+        raise InfluxError("cannot_connect", "timeout") from err
+    except ValueError as err:
+        raise InfluxError("invalid_url", str(err)) from err
+
+
+async def vm_post(session: aiohttp.ClientSession, settings: dict[str, Any], path: str, text: str) -> None:
+    """POST lines to a VictoriaMetrics import endpoint."""
+    auth, headers = _auth(settings)
+    if "Authorization" in headers:
+        headers = {"Authorization": "Bearer " + headers["Authorization"].split(" ", 1)[1]}
+    try:
+        async with session.post(
+            settings["url"].rstrip("/") + path,
+            data=text.encode(),
+            auth=auth,
+            headers={**headers, "Content-Type": "text/plain"},
+            timeout=TIMEOUT,
+            ssl=settings.get("verify_ssl", True),
+        ) as response:
+            if response.status in (401, 403):
+                raise InfluxError("invalid_auth")
+            if response.status not in (200, 204):
+                body = (await response.text())[:200]
+                raise InfluxError("write_failed", f"HTTP {response.status}: {body}")
+    except aiohttp.ClientError as err:
+        raise InfluxError("cannot_connect", str(err)) from err
+    except TimeoutError as err:
+        raise InfluxError("cannot_connect", "timeout") from err
+    except ValueError as err:  # e.g. aiohttp refusing credentials both in URL and header
+        raise InfluxError("invalid_url", str(err)) from err
+
+
+def vm_decode(body: bytes) -> dict[str, Any]:
+    """Parse and check a VictoriaMetrics JSON answer (executor job for large bodies)."""
+    try:
+        payload = orjson.loads(body)
+    except ValueError as err:
+        raise InfluxError("not_influxdb", str(err)) from err
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        raise InfluxError("not_influxdb", "not a VictoriaMetrics answer")
+    return payload

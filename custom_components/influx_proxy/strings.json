@@ -3,8 +3,9 @@
     "step": {
       "user": {
         "title": "InfluxDB connection",
-        "description": "The InfluxQL `/query` endpoint of InfluxDB 1.x, 2.x (v1 compatibility API with a DBRP mapping) or 3.x.",
+        "description": "InfluxDB: the InfluxQL `/query` endpoint of 1.x, 2.x (v1 compatibility API with a DBRP mapping) or 3.x. VictoriaMetrics: the data Home Assistant's InfluxDB integration writes to it (read-only; only numbers are stored there, so text states are not available).",
         "data": {
+          "backend": "Database",
           "url": "URL",
           "database": "Database",
           "auth": "Authentication",
@@ -12,7 +13,7 @@
         },
         "data_description": {
           "url": "For example http://192.168.1.10:8086",
-          "database": "In InfluxDB 2.x/3.x: the database name mapped to your bucket."
+          "database": "InfluxDB 2.x/3.x: the database name mapped to your bucket. VictoriaMetrics: the database set in the InfluxDB integration (the `db` label)."
         }
       },
       "credentials": {
@@ -49,7 +50,8 @@
           "override_measurement": "Override measurement",
           "max_entities": "Max entities per request",
           "max_days": "Max days per request",
-          "max_state_rows": "Max state changes per entity"
+          "max_state_rows": "Max state changes per entity",
+          "write_states": "Store text states (VictoriaMetrics)"
         },
         "data_description": {
           "measurement_mode": "Unit: all temperatures in \"°C\", humidity in \"%\" - what Home Assistant does unless you changed it. entity_id: every entity in its own measurement. Domain and device class: e.g. \"sensor__temperature\".",
@@ -57,7 +59,8 @@
           "override_measurement": "Reads every entity from this one measurement and ignores the rules above. Same as \"override_measurement\" in the InfluxDB integration. Usually empty.",
           "max_entities": "How many entities a card may fetch at once - a guard against overloading the database.",
           "max_days": "How far back one request may go (800 days = about 2 years).",
-          "max_state_rows": "Raw state changes (/states endpoint): at most this many rows per entity in one request; when a range has more, the newest are kept. A busy motion sensor writes ~700 a day."
+          "max_state_rows": "Raw state changes (/states endpoint): at most this many rows per entity in one request; when a range has more, the newest are kept. A busy motion sensor writes ~700 a day.",
+          "write_states": "VictoriaMetrics keeps numbers only, so states like \"playing\" or a washing machine program are lost. With this on, the proxy writes them itself, as codes from a dictionary kept in VictoriaMetrics, and reads them back in /states. Needs write access. Free text (long or ever-changing states) is skipped. No effect with InfluxDB."
         }
       }
     }
@@ -67,7 +70,7 @@
       "options": {
         "none": "None",
         "basic": "Username and password",
-        "token": "Token (InfluxDB 2.x/3.x)"
+        "token": "Token (InfluxDB 2.x/3.x, VictoriaMetrics)"
       }
     },
     "measurement_mode": {
@@ -75,6 +78,12 @@
         "unit_of_measurement": "Unit, e.g. °C (Home Assistant default)",
         "entity_id": "entity_id of the entity",
         "domain_device_class": "Domain and device class, e.g. sensor__temperature"
+      }
+    },
+    "backend": {
+      "options": {
+        "influxdb": "InfluxDB 1.x, 2.x or 3.x",
+        "victoriametrics": "VictoriaMetrics"
       }
     }
   }

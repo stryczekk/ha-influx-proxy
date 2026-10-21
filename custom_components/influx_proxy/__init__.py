@@ -36,10 +36,13 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.json import json_bytes
 from homeassistant.helpers.typing import ConfigType
 
-from .client import InfluxError, decode, run_query
+from . import vm
+from .client import InfluxError, decode, run_query, vm_decode, vm_get
 from .const import (
     API_PATH,
     API_STATES_PATH,
+    BACKEND_VICTORIAMETRICS,
+    CONF_BACKEND,
     CONF_DATABASE,
     CONF_DEFAULT_MEASUREMENT,
     CONF_MAX_DAYS,
@@ -47,6 +50,7 @@ from .const import (
     CONF_MAX_STATE_ROWS,
     CONF_MEASUREMENT_MODE,
     CONF_OVERRIDE_MEASUREMENT,
+    CONF_WRITE_STATES,
     DEFAULT_DATABASE,
     DEFAULT_MAX_DAYS,
     DEFAULT_MAX_ENTITIES,
@@ -55,10 +59,12 @@ from .const import (
     STATES_MAX_ENTITIES,
 )
 from .query import (
+    BEFORE_LOOKBACK_HOURS,
     MAX_STATE_ATTRIBUTES,
     MEASUREMENT_UNIT,
     MeasurementNaming,
     before_query,
+    group_interval,
     measurement_for,
     merge_before,
     missing_before,
@@ -70,6 +76,8 @@ from .query import (
     valid_attribute,
     valid_entity_id,
 )
+
+from .writer import StateWriter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -130,7 +138,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    hass.data[DOMAIN]["settings"] = {**entry.data, **entry.options}
+    settings = {**entry.data, **entry.options}
+    hass.data[DOMAIN]["settings"] = settings
+    if settings.get(CONF_BACKEND) == BACKEND_VICTORIAMETRICS and settings.get(CONF_WRITE_STATES):
+        writer = StateWriter(hass, settings)
+        writer.async_start()
+        entry.async_on_unload(writer.async_stop)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     _LOGGER.debug("Endpoint %s serving %s", API_PATH, entry.data[CONF_URL])
     return True
@@ -153,6 +166,46 @@ def _answer(body: bytes, build: Callable[[dict[str, Any]], Any]) -> bytes:
 def _build(body: bytes, build: Callable[[dict[str, Any]], Any]) -> Any:
     """Decode an InfluxDB body and shape it (executor job)."""
     return build(decode(body))
+
+
+def _vm_series_answer(entities: list[str], bodies: list[bytes], step: str, start_ms: int) -> bytes:
+    """VictoriaMetrics query_range answers as the /series response (executor job)."""
+    out = {}
+    for entity_id, body in zip(entities, bodies):
+        if points := vm.parse_series(vm_decode(body), step, start_ms):
+            out[entity_id] = points
+    return json_bytes(out)
+
+
+def _vm_rows(
+    targets: list[tuple[str, str]],
+    bodies: list[bytes],
+    attributes: tuple[str, ...],
+    labels: dict[int, str],
+) -> dict[str, list[list]]:
+    """VictoriaMetrics export bodies as state rows per entity (executor job)."""
+    return {e: vm.parse_export(body, e, m, attributes, labels) for (e, m), body in zip(targets, bodies)}
+
+
+_warned_ambiguous: set[int] = set()
+
+
+def _vm_labels(body: bytes) -> dict[int, str]:
+    """The text-state dictionary as {code: label} (executor job). A code with
+    two labels (two writers on one `db`) is left out: its rows are not shown."""
+    dictionary = vm.parse_dictionary(vm_decode(body))
+    if new := dictionary.ambiguous.keys() - _warned_ambiguous:
+        _warned_ambiguous.update(new)
+        _LOGGER.error(
+            "Text states: codes %s stand for more than one state (two writers on one database?); "
+            "their rows are left out", {c: dictionary.ambiguous[c] for c in sorted(new)},
+        )
+    return dictionary.labels
+
+
+def _vm_last(bodies: list[bytes]) -> list[int | None]:
+    """Times of the last change before the range (executor job)."""
+    return [vm.parse_last_before(vm_decode(body)) for body in bodies]
 
 
 class _InfluxView(HomeAssistantView):
@@ -265,6 +318,12 @@ class _InfluxView(HomeAssistantView):
             return self._failed(err)
         return web.Response(body=out, content_type=CONTENT_TYPE_JSON)
 
+    async def _vm(self, settings: dict[str, Any], calls: list[tuple[str, Any]]) -> list[bytes]:
+        """GET each (path, params) from VictoriaMetrics under one query slot."""
+        session = async_get_clientsession(self._hass, settings.get("verify_ssl", True))
+        async with self._slots:
+            return [await vm_get(session, settings, path, params) for path, params in calls]
+
     def _failed(self, err: InfluxError) -> web.Response:
         # detail (host, port, InfluxDB error text) only in the log -
         # any logged-in user, admin or not, can call these endpoints
@@ -296,6 +355,18 @@ class SeriesView(_InfluxView):
         if not targets:
             return self.json({})
         entities = [e for e, _ in targets]
+        if settings.get(CONF_BACKEND) == BACKEND_VICTORIAMETRICS:
+            now_ms = int(time.time() * 1000)
+            db = settings.get(CONF_DATABASE) or ""
+            calls = [("/api/v1/query_range", vm.series_params(e, m, days, window, now_ms, db)) for e, m in targets]
+            try:
+                bodies = await self._vm(settings, calls)
+                out = await self._hass.async_add_executor_job(
+                    _vm_series_answer, entities, bodies, group_interval(days), vm.time_range(days, window, now_ms)[0]
+                )
+            except InfluxError as err:
+                return self._failed(err)
+            return web.Response(body=out, content_type=CONTENT_TYPE_JSON)
         return await self._query(
             settings,
             [series_query(e, m, days, window) for e, m in targets],
@@ -330,6 +401,8 @@ class StatesView(_InfluxView):
         if not targets:
             return self.json({})
         limit = int(settings.get(CONF_MAX_STATE_ROWS, DEFAULT_MAX_STATE_ROWS))
+        if settings.get(CONF_BACKEND) == BACKEND_VICTORIAMETRICS:
+            return await self._vm_states(settings, targets, days, window, attributes, limit)
         queries = [q for e, m in targets for q in states_queries(e, m, days, attributes, limit, window)]
         entities = [e for e, _ in targets]
         try:
@@ -353,3 +426,50 @@ class StatesView(_InfluxView):
         except InfluxError as err:
             return self._failed(err)
         return web.Response(body=out, content_type=CONTENT_TYPE_JSON)
+
+    async def _vm_states(
+        self,
+        settings: dict[str, Any],
+        targets: list[tuple[str, str]],
+        days: float,
+        window: tuple[int, int] | None,
+        attributes: tuple[str, ...],
+        limit: int,
+    ) -> web.Response:
+        """/states from VictoriaMetrics: raw samples of the range and the day
+        before it; for entities quiet in that day, the last change before the
+        range is found by time first and then exported alone."""
+        db = settings.get(CONF_DATABASE) or ""
+        start, end = vm.time_range(days, window, int(time.time() * 1000))
+        lookback = start - BEFORE_LOOKBACK_HOURS * 3600_000
+        try:
+            dictionary, *bodies = await self._vm(
+                settings,
+                [("/api/v1/series", vm.dictionary_params(db))]
+                + [("/api/v1/export", vm.export_params(e, m, attributes, lookback, end, db)) for e, m in targets],
+            )
+            labels = await self._hass.async_add_executor_job(_vm_labels, dictionary)
+            rows = await self._hass.async_add_executor_job(_vm_rows, targets, bodies, attributes, labels)
+            missing = [
+                (e, m) for e, m in targets
+                if not any(r[0] <= start for r in rows[e]) and sum(r[0] > start for r in rows[e]) < limit
+            ]
+            if missing:
+                times = await self._hass.async_add_executor_job(_vm_last, await self._vm(
+                    settings, [("/api/v1/query", vm.last_before_params(e, m, start, db)) for e, m in missing]
+                ))
+                found = [(target, t) for target, t in zip(missing, times) if t is not None]
+                if found:
+                    bodies = await self._vm(
+                        settings,
+                        [("/api/v1/export", vm.export_params(e, m, attributes, t, t, db)) for (e, m), t in found],
+                    )
+                    for entity_id, older in (await self._hass.async_add_executor_job(
+                        _vm_rows, [target for target, _ in found], bodies, attributes, labels
+                    )).items():
+                        rows[entity_id] = older[-1:] + rows[entity_id]
+            out = {e: r for e, _ in targets if (r := vm.states_rows(rows[e], rows[e], start, limit))}
+            body = await self._hass.async_add_executor_job(json_bytes, out)
+        except InfluxError as err:
+            return self._failed(err)
+        return web.Response(body=body, content_type=CONTENT_TYPE_JSON)

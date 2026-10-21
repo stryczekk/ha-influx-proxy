@@ -97,7 +97,7 @@ def main() -> int:
     status, flow = call("POST", "/config/config_entries/flow", {"handler": DOMAIN})
     fields = [f["name"] for f in flow.get("data_schema", [])]
     check("flow starts with the 'user' form", flow.get("step_id") == "user", str(flow.get("step_id")))
-    check("user form fields", fields == ["url", "database", "auth", "verify_ssl"], str(fields))
+    check("user form fields", fields == ["backend", "url", "database", "auth", "verify_ssl"], str(fields))
     fid = flow.get("flow_id")
 
     _, flow = call("POST", f"/config/config_entries/flow/{fid}",
@@ -159,7 +159,7 @@ def main() -> int:
     _, opt = call("POST", "/config/config_entries/options/flow", {"handler": entry_id})
     ofields = [f["name"] for f in opt.get("data_schema", [])]
     check("options form fields", ofields == ["measurement_mode", "default_measurement",
-          "override_measurement", "max_entities", "max_days", "max_state_rows"], str(ofields))
+          "override_measurement", "max_entities", "max_days", "max_state_rows", "write_states"], str(ofields))
     _, opt = call("POST", f"/config/config_entries/options/flow/{opt['flow_id']}",
                   {"measurement_mode": "unit_of_measurement", "default_measurement": "state",
                    "override_measurement": "", "max_entities": 3, "max_days": 30, "max_state_rows": 250000})
