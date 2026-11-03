@@ -1,0 +1,90 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "InfluxDB-Verbindung",
+        "description": "InfluxDB: der InfluxQL-Endpunkt `/query` von 1.x, 2.x (v1-Kompatibilitäts-API mit DBRP-Zuordnung) oder 3.x. VictoriaMetrics: die Daten, die die InfluxDB-Integration von Home Assistant dorthin schreibt (nur lesend; dort werden nur Zahlen gespeichert, Textzustände sind daher nicht verfügbar).",
+        "data": {
+          "backend": "Datenbank",
+          "url": "URL",
+          "database": "Datenbank",
+          "auth": "Authentifizierung",
+          "verify_ssl": "SSL-Zertifikat prüfen"
+        },
+        "data_description": {
+          "url": "Zum Beispiel http://192.168.1.10:8086",
+          "database": "InfluxDB 2.x/3.x: der Datenbankname, der deinem Bucket zugeordnet ist. VictoriaMetrics: die in der InfluxDB-Integration eingestellte Datenbank (das Label `db`)."
+        }
+      },
+      "credentials": {
+        "title": "Zugangsdaten",
+        "description": "Ein Konto mit Lesezugriff genügt und wird empfohlen.",
+        "data": {
+          "username": "Benutzername",
+          "password": "Passwort",
+          "token": "Token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Keine Verbindung zu InfluxDB möglich.",
+      "invalid_auth": "Ungültige Zugangsdaten.",
+      "database_not_found": "Datenbank nicht gefunden.",
+      "unknown": "Unerwarteter Fehler, siehe Protokoll.",
+      "url_credentials": "Gib Benutzername oder Passwort nicht in der URL an - sie werden im nächsten Schritt abgefragt.",
+      "invalid_url": "Ungültige URL; erwartet wird http:// oder https://.",
+      "not_influxdb": "Unter dieser URL hat etwas anderes als InfluxDB geantwortet (z. B. eine Anmeldeseite)."
+    },
+    "abort": {
+      "single_instance_allowed": "Bereits eingerichtet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Measurements und Grenzen",
+        "description": "Der Proxy muss aus denselben Measurements (InfluxDB-Tabellen) lesen, in die die InfluxDB-Integration von Home Assistant schreibt. Übernimm die Einstellungen von dort - sonst bleiben die Diagramme leer.",
+        "data": {
+          "measurement_mode": "Name des Measurements kommt von",
+          "default_measurement": "Standard-Measurement",
+          "override_measurement": "Measurement überschreiben",
+          "max_entities": "Max. Entitäten pro Anfrage",
+          "max_days": "Max. Tage pro Anfrage",
+          "max_state_rows": "Max. Zustandsänderungen pro Entität",
+          "write_states": "Textzustände speichern (VictoriaMetrics)"
+        },
+        "data_description": {
+          "measurement_mode": "Einheit: alle Temperaturen in \"°C\", Luftfeuchtigkeit in \"%\" - so macht es Home Assistant, sofern du es nicht geändert hast. entity_id: jede Entität in einem eigenen Measurement. Domäne und Geräteklasse: z. B. \"sensor__temperature\".",
+          "default_measurement": "Für Entitäten, für die die Regel oben keinen Namen ergibt, z. B. ohne Einheit (an/aus-Zustände, Modi). Wie \"default_measurement\" in der InfluxDB-Integration, oft \"state\". Leer = die entity_id.",
+          "override_measurement": "Liest jede Entität aus diesem einen Measurement und ignoriert die Regeln oben. Wie \"override_measurement\" in der InfluxDB-Integration. Meist leer.",
+          "max_entities": "Wie viele Entitäten eine Karte auf einmal abrufen darf - ein Schutz gegen Überlastung der Datenbank.",
+          "max_days": "Wie weit eine Anfrage zurückreichen darf (800 Tage = etwa 2 Jahre).",
+          "max_state_rows": "Rohe Zustandsänderungen (Endpunkt /states): höchstens so viele Zeilen pro Entität in einer Anfrage; hat ein Zeitraum mehr, werden die neuesten behalten. Ein vielbeschäftigter Bewegungsmelder schreibt ~700 am Tag.",
+          "write_states": "VictoriaMetrics speichert nur Zahlen, daher gehen Zustände wie \"playing\" oder ein Waschmaschinenprogramm verloren. Ist dies aktiv, schreibt der Proxy sie selbst, als Codes aus einem in VictoriaMetrics gespeicherten Wörterbuch, und liest sie in /states wieder. Braucht Schreibzugriff. Freitext (lange oder ständig wechselnde Zustände) wird übersprungen. Keine Wirkung bei InfluxDB."
+        }
+      }
+    }
+  },
+  "selector": {
+    "auth": {
+      "options": {
+        "none": "Keine",
+        "basic": "Benutzername und Passwort",
+        "token": "Token (InfluxDB 2.x/3.x, VictoriaMetrics)"
+      }
+    },
+    "measurement_mode": {
+      "options": {
+        "unit_of_measurement": "Einheit, z. B. °C (Home-Assistant-Standard)",
+        "entity_id": "entity_id der Entität",
+        "domain_device_class": "Domäne und Geräteklasse, z. B. sensor__temperature"
+      }
+    },
+    "backend": {
+      "options": {
+        "influxdb": "InfluxDB 1.x, 2.x oder 3.x",
+        "victoriametrics": "VictoriaMetrics"
+      }
+    }
+  }
+}
